@@ -1,6 +1,11 @@
 name: daily-main-pipeline
 prefect-version: ">=2.16.0"
 
+pull:
+  - prefect.projects.steps.git_clone:
+      repository: "https://{{ env.GITHUB_PAT }}@github.com/allyz1/Datboard_prefect.git"
+      branch: "main"
+
 build:
   - prefect.projects.steps.set_dependencies:
       requirements: "requirements.txt"

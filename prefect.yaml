@@ -1,14 +1,15 @@
 name: daily-main-pipeline
-prefect-version: ">=2.16.0"
+prefect-version: ">=3.0.0"
 
+# Runtime steps executed on Prefect's managed infra each run
 pull:
-  - prefect.projects.steps.git_clone:
-      repository: "https://{{ env.GITHUB_PAT }}@github.com/allyz1/Datboard_prefect.git"
+  - prefect.deployments.steps.git_clone:
+      repository: "https://github.com/allyz1/Datboard_prefect.git"
       branch: "main"
-
-build:
-  - prefect.projects.steps.set_dependencies:
-      requirements: "requirements.txt"
+      # use an env var token so you don't hardcode secrets
+      access_token: "{{ env.GITHUB_PAT }}"
+  - prefect.deployments.steps.pip_install_requirements:
+      requirements_file: "requirements.txt"
 
 deployments:
   - name: daily

@@ -1,0 +1,16 @@
+name: daily-main-pipeline
+prefect-version: ">=2.16.0"
+
+build:
+  - prefect.projects.steps.set_dependencies:
+      requirements: "requirements.txt"
+
+deployments:
+  - name: daily
+    flow_name: daily-main-pipeline
+    entrypoint: "flows/daily_main_flow.py:daily_main_pipeline"
+    work_pool:
+      name: "default-pool"
+    schedule:
+      cron: "0 6 * * *"
+      timezone: "America/Los_Angeles"

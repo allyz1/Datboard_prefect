@@ -1,0 +1,10 @@
+prefect>=2.16,<3
+pandas
+python-dotenv
+croniter
+pytz
+supabase
+beautifulsoup4
+lxml
+requests
+python-dateutil

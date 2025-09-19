@@ -6,8 +6,7 @@ pull:
   - prefect.deployments.steps.git_clone:
       repository: "https://github.com/allyz1/Datboard_prefect.git"
       branch: "main"
-      # use an env var token so you don't hardcode secrets
-      access_token: "{{ env.GITHUB_PAT }}"
+      access_token: "{{ prefect.blocks.github-credentials.datboardgit.token }}"
   - prefect.deployments.steps.pip_install_requirements:
       requirements_file: "requirements.txt"
 
@@ -17,6 +16,10 @@ deployments:
     entrypoint: "flows/daily_main_flow.py:daily_main_pipeline"
     work_pool:
       name: "managed-pool"
+      job_variables:
+        env:
+          SUPABASE_URL: "{{ prefect.blocks.secret.supabaseurl }}"
+          SUPABASE_SERVICE_KEY: "{{ prefect.blocks.secret.supabaseanonkey }}"
     schedule:
       cron: "0 6 * * *"
       timezone: "America/Los_Angeles"

@@ -6,6 +6,7 @@ pull:
       branch: "main"
       credentials: "{{ prefect.blocks.github-credentials.mygithubcreds }}"
   - prefect.deployments.steps.pip_install_requirements:
+      directory: "{{ checkout.directory }}"
       requirements_file: "requirements.txt"
 
 deployments:

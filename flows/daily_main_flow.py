@@ -3,6 +3,8 @@ from prefect import flow, task, get_run_logger
 import pandas as pd
 from app import config  # loads .env locally; in prod set real env vars
 from app.clients.supabase_append import concat_and_upload
+from prefect.runner.storage import GitRepository
+from prefect_github import GitHubCredentials
 
 # Producers
 from app.crawlers.sequans_bitcoin_api_scraper import get_sequans_holdings_df
@@ -12,7 +14,7 @@ from app.crawlers.btcs_daily import get_btcs_eth_holdings_df
 from app.pipelines.ETH_SEC_holdings_main import get_sec_eth_holdings_df
 from app.pipelines.BTC_SEC_holdings_main import get_sec_btc_holdings_df
 
-DEFAULT_TABLE = "Holdings_test"
+DEFAULT_TABLE = "Holdings_raw"
 
 @task(retries=2, retry_delay_seconds=60)
 def t_sequans() -> pd.DataFrame:

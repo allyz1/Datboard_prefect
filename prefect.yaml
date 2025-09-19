@@ -1,12 +1,11 @@
 name: daily-main-pipeline
 prefect-version: ">=3.0.0"
 
-# Runtime steps executed on Prefect's managed infra each run
 pull:
   - prefect.deployments.steps.git_clone:
       repository: "https://github.com/allyz1/Datboard_prefect.git"
       branch: "main"
-      access_token: "{{ prefect.blocks.github-credentials.datboardgit.token }}"
+      access_token: "{{ prefect.blocks.secret.githubpat }}"
   - prefect.deployments.steps.pip_install_requirements:
       requirements_file: "requirements.txt"
 

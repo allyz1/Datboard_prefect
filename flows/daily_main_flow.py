@@ -3,8 +3,6 @@ from prefect import flow, task, get_run_logger
 import pandas as pd
 from app import config  # loads .env locally; in prod set real env vars
 from app.clients.supabase_append import concat_and_upload
-from prefect.runner.storage import GitRepository
-from prefect_github import GitHubCredentials
 
 # Producers
 from app.crawlers.sequans_bitcoin_api_scraper import get_sequans_holdings_df

@@ -1,11 +1,10 @@
 name: daily-main-pipeline
 prefect-version: ">=3.0.0"
-
 pull:
   - prefect.deployments.steps.git_clone:
       repository: "https://github.com/allyz1/Datboard_prefect.git"
       branch: "main"
-      access_token: "{{ prefect.blocks.secret.githubpat }}"
+      credentials: "{{ prefect.blocks.github-credentials.mygithubcreds }}"
   - prefect.deployments.steps.pip_install_requirements:
       requirements_file: "requirements.txt"
 

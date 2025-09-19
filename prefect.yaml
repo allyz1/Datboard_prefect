@@ -5,12 +5,11 @@ pull:
       repository: "https://github.com/allyz1/Datboard_prefect.git"
       branch: "main"
       credentials: "{{ prefect.blocks.github-credentials.mygithubcreds }}"
-  - prefect.deployments.steps.run_shell_command:
+  - prefect.deployments.steps.run_shell_script:
       directory: "{{ clone.directory }}"
       stream_output: true
-      command: |
-        set -e
-        echo "Clone directory is: {{ clone.directory }}"
+      script: |
+        echo "Clone directory: $(pwd)"
         echo "== ls -la (repo root) =="
         ls -la
         echo "== find requirements.txt (depth 3) =="

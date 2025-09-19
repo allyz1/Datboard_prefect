@@ -21,8 +21,8 @@ deployments:
       name: "managed-pool"
       job_variables:
         env:
-          SUPABASE_URL: "{{ prefect.blocks.secret.supabaseurl }}"
-          SUPABASE_SERVICE_KEY: "{{ prefect.blocks.secret.supabaseanonkey }}"
+          SUPABASE_URL: "{{ prefect.blocks.secret.superbaseurl }}"
+          SUPABASE_SERVICE_KEY: "{{ prefect.blocks.secret.superbaseanonkey }}"
     schedule:
       cron: "0 6 * * *"
       timezone: "America/Los_Angeles"

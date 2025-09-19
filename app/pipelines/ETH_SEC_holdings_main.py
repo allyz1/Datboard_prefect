@@ -8,8 +8,8 @@ import re
 import pandas as pd
 
 # === SEC ETH modules ===
-import ETH_table_pipeline as mod_xml          # iXBRL/HTML ETH table extractor
-import ETH_dat_timeline as mod_html           # HTML ETH purchases/intents & holdings
+from app.sec import ETH_table_pipeline as mod_xml          # iXBRL/HTML ETH table extractor
+from app.sec import ETH_dat_timeline as mod_html           # HTML ETH purchases/intents & holdings
 
 # -------- Normalized schema (consistent with your original) --------
 # record_type: "ixbrl_table" | "completed_purchase" | "purchase_intent" | "holdings_snapshot"

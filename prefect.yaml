@@ -5,22 +5,6 @@ pull:
       repository: "https://github.com/allyz1/Datboard_prefect.git"
       branch: "main"
       credentials: "{{ prefect.blocks.github-credentials.mygithubcreds }}"
-  - prefect.deployments.steps.run_shell_script:
-      directory: "{{ clone.directory }}"
-      stream_output: true
-      script: |
-        echo "Clone directory: $(pwd)"
-        echo "== ls -la (repo root) =="
-        ls -la
-        echo "== find requirements.txt (depth 3) =="
-        find . -maxdepth 3 -name 'requirements.txt' -print
-  - prefect.deployments.steps.pip_install_requirements:
-      requirements_file: "{{ clone.directory }}/requirements.txt"
-      stream_output: true
-
-  - prefect.deployments.steps.run_shell_command:
-      command: "pwd && ls -la"
-      directory: "{{ clone.directory }}"
 
 deployments:
   - name: daily

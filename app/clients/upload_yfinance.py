@@ -20,7 +20,6 @@ def df_to_records_clean(df: pd.DataFrame) -> List[Dict[str, Any]]:
 
     df["date"] = pd.to_datetime(df["date"]).dt.date
     df["ticker"] = df["ticker"].astype(str)
-    df["key"] = df["date"].astype(str) + "-" + df["ticker"]
 
     df = df.where(df.notnull(), None)
 

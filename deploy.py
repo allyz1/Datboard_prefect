@@ -24,7 +24,7 @@ if __name__ == "__main__":
             # Prefect Managed will pip install these packages at run time
             "pip_packages": [
                 "pandas", "numpy", "requests", "beautifulsoup4", "lxml",
-                "python-dateutil", "python-dotenv", "supabase"
+                "python-dateutil", "python-dotenv", "supabase", "yfinance",
             ],
             # Env that your code reads via os.environ[…]
             "env": {

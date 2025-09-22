@@ -4,6 +4,8 @@ import pandas as pd
 from app import config  # loads .env locally; in prod set real env vars
 from app.clients.supabase_append import concat_and_upload
 from app.clients.upload_coinbase import upload_coinbase_df
+from app.prices.yahoo import get_last_n_days_excluding_today_yf
+from app.clients.upload_yfinance import upload_yfinance_df
 import os
 
 # Producers
@@ -60,6 +62,16 @@ def t_coinbase_prices() -> pd.DataFrame:
     cols = ["date","product_id","open","high","low","close","volume"]
     return df.reindex(columns=cols)
 
+# New Prefect task
+@task(retries=2, retry_delay_seconds=60)
+def t_yfinance_prices() -> pd.DataFrame:
+    # Choose your tickers (example includes both equities and crypto)
+    tickers = ["AAPL", "MSFT", "BTC-USD", "ETH-USD", "SOL-USD"]
+    df = get_last_n_days_excluding_today_yf(tickers=tickers, n=3)
+    # enforce expected order
+    cols = ["date","ticker","open","high","low","close","adj_close","volume"]
+    return df.reindex(columns=cols)
+
 
 @flow(name="daily-main-pipeline", log_prints=True)
 def daily_main_pipeline(table: str = DEFAULT_TABLE, do_update: bool = False):
@@ -94,8 +106,25 @@ def daily_main_pipeline(table: str = DEFAULT_TABLE, do_update: bool = False):
         )
     else:
         logger.warning("[Prices -> coinbase] No rows produced for last 3 days.")
+        
+    ytask = t_yfinance_prices.submit()
+    yf_df = ytask.result()
 
-    return {"holdings": stats_holdings, "coinbase": stats_cb if not coinbase_df.empty else None}
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+    if not supabase_url or not supabase_key:
+        logger.error("[Prices -> yfinance] Missing SUPABASE_URL or SUPABASE_SERVICE_KEY")
+        yf_stats = None
+    else:
+        if not yf_df.empty:
+            yf_stats = upload_yfinance_df(supabase_url, supabase_key, yf_df)
+            logger.info(
+                f"[Prices -> yfinance] attempted={yf_stats['attempted']} sent={yf_stats['sent']}"
+            )
+        else:
+            logger.warning("[Prices -> yfinance] No rows produced for last 3 days.")
+            yf_stats = None
+    return {"holdings": stats_holdings, "coinbase": stats_cb if not coinbase_df.empty else None, "yfinance": yf_stats}
 
 if __name__ == "__main__":
     daily_main_pipeline()

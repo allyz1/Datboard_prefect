@@ -3,6 +3,8 @@ from prefect import flow, task, get_run_logger
 import pandas as pd
 from app import config  # loads .env locally; in prod set real env vars
 from app.clients.supabase_append import concat_and_upload
+from app.clients.upload_coinbase import upload_coinbase_df
+import os
 
 # Producers
 from app.crawlers.sequans_bitcoin_api_scraper import get_sequans_holdings_df
@@ -84,38 +86,14 @@ def daily_main_pipeline(table: str = DEFAULT_TABLE, do_update: bool = False):
     coinbase_df = ctask.result()
 
     if not coinbase_df.empty:
-        import numpy as np
-
-        # enforce expected columns/order
-        cols = ["date", "product_id", "open", "high", "low", "close", "volume"]
-        coinbase_df = coinbase_df.reindex(columns=cols).copy()
-
-        # coerce numerics, remove inf/nan rows
-        numeric = ["open","high","low","close","volume"]
-        coinbase_df[numeric] = coinbase_df[numeric].apply(pd.to_numeric, errors="coerce")
-        coinbase_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-        before = len(coinbase_df)
-        coinbase_df.dropna(subset=numeric, inplace=True)
-        after = len(coinbase_df)
-
-        # canonical JSON-safe types
-        coinbase_df["date"] = pd.to_datetime(coinbase_df["date"]).dt.date  # Python date
-        coinbase_df["product_id"] = coinbase_df["product_id"].astype(str)
-
-        # (optional) explicit key column if your uploader expects/uses it directly
-        coinbase_df["key"] = coinbase_df["date"].astype(str) + "-" + coinbase_df["product_id"]
-
-        if not coinbase_df.empty:
-            stats_cb = concat_and_upload("coinbase", [coinbase_df], do_update=True)
-            logger.info(
-                f"[Prices -> coinbase] rows_in={before}, rows_clean={after}, "
-                f"attempted={stats_cb['attempted']} skipped={stats_cb['skipped_existing']} sent={stats_cb['sent']}"
-            )
-        else:
-            logger.warning("[Prices -> coinbase] All rows dropped after NaN/Inf sanitization.")
+        stats_cb = upload_coinbase_df(
+            os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"], coinbase_df
+        )
+        logger.info(
+            f"[Prices -> coinbase] attempted={stats_cb['attempted']} sent={stats_cb['sent']}"
+        )
     else:
         logger.warning("[Prices -> coinbase] No rows produced for last 3 days.")
-
 
     return {"holdings": stats_holdings, "coinbase": stats_cb if not coinbase_df.empty else None}
 

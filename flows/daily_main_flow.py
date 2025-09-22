@@ -87,7 +87,7 @@ def daily_main_pipeline(table: str = DEFAULT_TABLE, do_update: bool = False):
 
     if not coinbase_df.empty:
         stats_cb = upload_coinbase_df(
-            os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_ROLE_KEY"], coinbase_df
+            os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"], coinbase_df
         )
         logger.info(
             f"[Prices -> coinbase] attempted={stats_cb['attempted']} sent={stats_cb['sent']}"

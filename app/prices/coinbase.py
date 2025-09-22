@@ -8,7 +8,7 @@ import numpy as np
 BASE = "https://api.exchange.coinbase.com"
 PRODUCTS = ["BTC-USD", "ETH-USD", "SOL-USD"]
 GRANULARITY = 86400  # 1 day
-HEADERS = {"User-Agent": "allyz-coinbase-daily/1.2"}
+HEADERS = {"User-Agent": "allyz-coinbase-daily/1.3"}
 
 def _iso_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -49,20 +49,22 @@ def get_last_n_days_excluding_today(n: int = 3, products = PRODUCTS) -> pd.DataF
     end = today_midnight_utc                      # exclusive (this is "today", excluded)
     start = end - timedelta(days=n)               # inclusive start for last n full days
 
+    # precompute the exact dates we want
+    valid_dates = pd.date_range(start=start.date(), end=(end.date() - timedelta(days=1)), freq="D").date
+
     frames = []
     for p in products:
-        df = _fetch(p, start, end)                # window covers exactly the n desired days
+        df = _fetch(p, start, end)
         if df.empty:
             continue
         # Keep only the exact date range, just in case
-        valid_dates = pd.date_range(start=start.date(), end=(end.date() - timedelta(days=1)), freq="D").date
         df = df[df["date"].isin(valid_dates)].copy()
 
-        # Basic completeness + JSON-safety
+        # ---- Basic per-product cleanup (numeric coercion + drop incomplete) ----
         must = ["open","high","low","close","volume"]
-        df = df.replace([np.inf, -np.inf], np.nan)
-        df = df.dropna(subset=must)
-        df = df.where(pd.notnull(df), None)       # NaN -> None for JSON payloads
+        df[must] = df[must].apply(pd.to_numeric, errors="coerce")
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df.dropna(subset=must, inplace=True)
 
         frames.append(df)
 
@@ -70,7 +72,24 @@ def get_last_n_days_excluding_today(n: int = 3, products = PRODUCTS) -> pd.DataF
         return pd.DataFrame(columns=["date","product_id","open","high","low","close","volume"])
 
     out = pd.concat(frames, ignore_index=True)
-    # enforce order & sort
+
+    # ---- FINAL HARD SANITIZER (prevents NaN/Inf in JSON uploads) ----
+    numeric = ["open","high","low","close","volume"]
+    # Coerce again post-concat (concat can upcast types)
+    out[numeric] = out[numeric].apply(pd.to_numeric, errors="coerce")
+    out.replace([np.inf, -np.inf], np.nan, inplace=True)
+    out.dropna(subset=numeric, inplace=True)
+
+    # Canonical types
+    out["date"] = pd.to_datetime(out["date"]).dt.date     # Python date
+    out["product_id"] = out["product_id"].astype(str)
+    out = out.astype({c: float for c in numeric})
+
+    # Enforce order, sort, reset index
     out = out[["date","product_id","open","high","low","close","volume"]]
     out = out.sort_values(["date","product_id"]).reset_index(drop=True)
+
+    # Belt & suspenders: assert no NaNs remain
+    assert not out.isnull().any().any(), "NaN detected after sanitization."
+
     return out

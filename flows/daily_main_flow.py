@@ -13,7 +13,7 @@ from app.pipelines.ETH_SEC_holdings_main import get_sec_eth_holdings_df
 from app.pipelines.BTC_SEC_holdings_main import get_sec_btc_holdings_df
 
 # ⬇️ Add this import (your helper saved under app/prices/)
-from app.prices.coinbase import get_yesterday_daily  # returns df with date, product_id, open, high, low, close, volume
+from app.prices.coinbase import get_last_n_days_excluding_today  # returns df with date, product_id, open, high, low, close, volume
 
 DEFAULT_TABLE = "Holdings_raw"
 
@@ -54,11 +54,10 @@ def t_sec_btc() -> pd.DataFrame:
 # ⬇️ New Coinbase task (runs after others)
 @task(retries=2, retry_delay_seconds=60)
 def t_coinbase_prices() -> pd.DataFrame:
-    df = get_yesterday_daily()  # BTC-USD, ETH-USD, SOL-USD; one row each (yesterday UTC)
-    # Ensure expected schema/order for your Supabase helper
-    cols = ["date", "product_id", "open", "high", "low", "close", "volume"]
-    df = df.reindex(columns=cols)
-    return df
+    df = get_last_n_days_excluding_today(n=3)  # 3 fully closed days, excludes today
+    cols = ["date","product_id","open","high","low","close","volume"]
+    return df.reindex(columns=cols)
+
 
 @flow(name="daily-main-pipeline", log_prints=True)
 def daily_main_pipeline(table: str = DEFAULT_TABLE, do_update: bool = False):
@@ -83,17 +82,15 @@ def daily_main_pipeline(table: str = DEFAULT_TABLE, do_update: bool = False):
     # 3) Run Coinbase daily prices and upsert into `coinbase`
     ctask = t_coinbase_prices.submit()
     coinbase_df = ctask.result()
-
     if not coinbase_df.empty:
-        # Your table has PK: key = date||'-'||product_id (generated column),
-        # so safe to upsert.
+        # Upsert the 3*3=9 rows (3 products x 3 days) into `coinbase`
         stats_cb = concat_and_upload("coinbase", [coinbase_df], do_update=True)
         logger.info(
             f"[Prices -> coinbase] attempted={stats_cb['attempted']} "
             f"skipped={stats_cb['skipped_existing']} sent={stats_cb['sent']}"
         )
     else:
-        logger.warning("[Prices -> coinbase] No rows produced for yesterday (UTC).")
+        logger.warning("[Prices -> coinbase] No rows produced for last 3 days.")
 
     return {"holdings": stats_holdings, "coinbase": stats_cb if not coinbase_df.empty else None}
 

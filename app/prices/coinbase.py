@@ -1,35 +1,31 @@
-#!/usr/bin/env python3
-# Requires: pip install requests pandas
+# app/prices/coinbase_daily.py
 from datetime import datetime, timedelta, timezone
+import time
 import requests
 import pandas as pd
-import time
+import numpy as np
 
 BASE = "https://api.exchange.coinbase.com"
 PRODUCTS = ["BTC-USD", "ETH-USD", "SOL-USD"]
 GRANULARITY = 86400  # 1 day
-HEADERS = {"User-Agent": "allyz-coinbase-daily/1.0"}
+HEADERS = {"User-Agent": "allyz-coinbase-daily/1.2"}
 
 def _iso_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-def fetch_daily_window(product_id: str, start_utc: datetime, end_utc: datetime) -> pd.DataFrame:
+def _fetch(product_id: str, start_utc: datetime, end_utc: datetime) -> pd.DataFrame:
     """
-    Fetch daily candles for [start_utc, end_utc) at 1D granularity.
-    Coinbase returns rows as [time, low, high, open, close, volume] in reverse-chronological order.
+    Fetch daily candles in [start_utc, end_utc) for one product.
+    Returns columns: date, product_id, open, high, low, close, volume
     """
-    params = {
-        "granularity": GRANULARITY,
-        "start": _iso_z(start_utc),
-        "end": _iso_z(end_utc),
-    }
     url = f"{BASE}/products/{product_id}/candles"
+    params = {"granularity": GRANULARITY, "start": _iso_z(start_utc), "end": _iso_z(end_utc)}
 
     for attempt in range(5):
         r = requests.get(url, params=params, headers=HEADERS, timeout=30)
         if r.status_code == 200:
-            data = r.json()
-            if not data:
+            data = r.json() or []
+            if not isinstance(data, list) or not data:
                 return pd.DataFrame(columns=["date","product_id","open","high","low","close","volume"])
             df = pd.DataFrame(data, columns=["time","low","high","open","close","volume"])
             df["date"] = pd.to_datetime(df["time"], unit="s", utc=True).dt.date
@@ -41,31 +37,40 @@ def fetch_daily_window(product_id: str, start_utc: datetime, end_utc: datetime) 
             continue
         r.raise_for_status()
 
-    raise RuntimeError(f"Failed to fetch candles for {product_id}")
+    return pd.DataFrame(columns=["date","product_id","open","high","low","close","volume"])
 
-def get_yesterday_daily(products=PRODUCTS) -> pd.DataFrame:
+def get_last_n_days_excluding_today(n: int = 3, products = PRODUCTS) -> pd.DataFrame:
     """
-    Returns one row per product for the last fully completed UTC day ("yesterday" in UTC).
-    This avoids partial candles and is ideal for a once-per-day Prefect flow.
+    Returns daily candles for the last `n` fully completed UTC days (excludes today).
+    For n=3 and now=2025-09-22 UTC, returns dates: 2025-09-21, 2025-09-20, 2025-09-19.
     """
     now_utc = datetime.now(timezone.utc)
-    # Yesterday as a closed UTC day
-    y_start = (now_utc.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1))
-    y_end   = y_start + timedelta(days=1)
+    today_midnight_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = today_midnight_utc                      # exclusive (this is "today", excluded)
+    start = end - timedelta(days=n)               # inclusive start for last n full days
 
     frames = []
     for p in products:
-        # Window precisely covers yesterday -> yields exactly one daily candle if available
-        df = fetch_daily_window(p, y_start, y_end)
-        # Ensure only yesterday's date
-        if not df.empty:
-            df = df[df["date"] == y_start.date()]
+        df = _fetch(p, start, end)                # window covers exactly the n desired days
+        if df.empty:
+            continue
+        # Keep only the exact date range, just in case
+        valid_dates = pd.date_range(start=start.date(), end=(end.date() - timedelta(days=1)), freq="D").date
+        df = df[df["date"].isin(valid_dates)].copy()
+
+        # Basic completeness + JSON-safety
+        must = ["open","high","low","close","volume"]
+        df = df.replace([np.inf, -np.inf], np.nan)
+        df = df.dropna(subset=must)
+        df = df.where(pd.notnull(df), None)       # NaN -> None for JSON payloads
+
         frames.append(df)
 
-    if frames:
-        return pd.concat(frames, ignore_index=True)
-    return pd.DataFrame(columns=["date","product_id","open","high","low","close","volume"])
+    if not frames:
+        return pd.DataFrame(columns=["date","product_id","open","high","low","close","volume"])
 
-if __name__ == "__main__":
-    df = get_yesterday_daily()
-    print(df)
+    out = pd.concat(frames, ignore_index=True)
+    # enforce order & sort
+    out = out[["date","product_id","open","high","low","close","volume"]]
+    out = out.sort_values(["date","product_id"]).reset_index(drop=True)
+    return out

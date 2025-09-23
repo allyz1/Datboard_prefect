@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from supabase import create_client
 
-EXPECTED_COLS = ["date","ticker","open","high","low","close","adj_close","volume"]
+EXPECTED_COLS = ["date","ticker","open","close","adj_close","volume"]
 
 def df_to_records_clean(df: pd.DataFrame) -> List[Dict[str, Any]]:
     if df is None or df.empty:
@@ -13,10 +13,10 @@ def df_to_records_clean(df: pd.DataFrame) -> List[Dict[str, Any]]:
 
     df = df.loc[:, [c for c in EXPECTED_COLS if c in df.columns]].copy()
 
-    numeric = ["open","high","low","close","adj_close","volume"]
+    numeric = ["open","close","adj_close","volume"]
     df[numeric] = df[numeric].apply(pd.to_numeric, errors="coerce")
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.dropna(subset=["open","high","low","close","volume"], inplace=True)
+    df.dropna(subset=["open","close","adj_close","volume"], inplace=True)
 
     df["date"] = pd.to_datetime(df["date"]).dt.date
     df["ticker"] = df["ticker"].astype(str)

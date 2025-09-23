@@ -72,7 +72,7 @@ def t_coinbase_prices() -> pd.DataFrame:
 def t_yfinance_prices() -> pd.DataFrame:
     # Choose your tickers (example includes both equities and crypto)
     tickers = ["MSTR", "CEP", "NAKA", "SMLR", "SQNS", "BMNR", "SBET", "BTBT", "ETHZ", "BTCS", "DFDV", "UPXI"]
-    df = get_last_n_days_excluding_today_yf(tickers=tickers, n=3)
+    df = get_last_n_days_excluding_today_yf(tickers=tickers, n=7)
     # enforce expected order
     cols = ["date","ticker","open","high","low","close","adj_close","volume"]
     return df.reindex(columns=cols)

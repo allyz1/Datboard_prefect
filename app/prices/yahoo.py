@@ -74,7 +74,7 @@ def get_last_n_days_excluding_today_yf(
         return out
 
     # Keep only the exact dates we want (same as original)
-    valid_dates = pd.date_range(start=start.date(), end=(end.date() - timedelta(days=1)), freq="D").date
+    valid_dates = pd.date_range(start=start.date(), end=(end.date() - timedelta(days=3)), freq="D").date
     out["date"] = pd.to_datetime(out["date"]).dt.date
     out = out[out["date"].isin(valid_dates)].copy()
 

@@ -6,19 +6,32 @@ import pandas as pd
 import numpy as np
 
 BASE = "https://api.exchange.coinbase.com"
-PRODUCTS = ["BTC-USD", "ETH-USD", "SOL-USD"]
+# You can now list base assets only:
+PRODUCTS = ["BTC", "ETH", "SOL"]
 GRANULARITY = 86400  # 1 day
-HEADERS = {"User-Agent": "allyz-coinbase-daily/1.3"}
+HEADERS = {"User-Agent": "allyz-coinbase-daily/1.4"}
 
 def _iso_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-def _fetch(product_id: str, start_utc: datetime, end_utc: datetime) -> pd.DataFrame:
+def _endpoint_id(asset_or_pair: str) -> str:
+    """
+    Accepts 'BTC' or 'BTC-USD' and returns a valid Coinbase product id for the API.
+    We default USD if not provided.
+    """
+    return asset_or_pair if "-" in asset_or_pair else f"{asset_or_pair}-USD"
+
+def _base_asset(asset_or_pair: str) -> str:
+    """'BTC-USD' -> 'BTC', 'BTC' -> 'BTC'"""
+    return asset_or_pair.split("-")[0].upper()
+
+def _fetch(product: str, start_utc: datetime, end_utc: datetime) -> pd.DataFrame:
     """
     Fetch daily candles in [start_utc, end_utc) for one product.
-    Returns columns: date, product_id, open, high, low, close, volume
+    Returns columns: date, product_id (base asset), open, close
     """
-    url = f"{BASE}/products/{product_id}/candles"
+    pid = _endpoint_id(product)
+    url = f"{BASE}/products/{pid}/candles"
     params = {"granularity": GRANULARITY, "start": _iso_z(start_utc), "end": _iso_z(end_utc)}
 
     for attempt in range(5):
@@ -26,18 +39,22 @@ def _fetch(product_id: str, start_utc: datetime, end_utc: datetime) -> pd.DataFr
         if r.status_code == 200:
             data = r.json() or []
             if not isinstance(data, list) or not data:
-                return pd.DataFrame(columns=["date","product_id","open","high","low","close","volume"])
+                return pd.DataFrame(columns=["date", "product_id", "open", "close"])
             df = pd.DataFrame(data, columns=["time","low","high","open","close","volume"])
             df["date"] = pd.to_datetime(df["time"], unit="s", utc=True).dt.date
             df = df.sort_values("date").reset_index(drop=True)
-            df["product_id"] = product_id
-            return df[["date","product_id","open","high","low","close","volume"]]
+
+            # keep only what we need, and rename product_id to base asset
+            df["product_id"] = _base_asset(product)
+            df = df[["date","product_id","open","close"]]
+            return df
+
         if r.status_code in (429, 500, 502, 503, 504):
             time.sleep(2 ** attempt)
             continue
         r.raise_for_status()
 
-    return pd.DataFrame(columns=["date","product_id","open","high","low","close","volume"])
+    return pd.DataFrame(columns=["date", "product_id", "open", "close"])
 
 def get_last_n_days_excluding_today(n: int = 3, products = PRODUCTS) -> pd.DataFrame:
     """
@@ -46,10 +63,9 @@ def get_last_n_days_excluding_today(n: int = 3, products = PRODUCTS) -> pd.DataF
     """
     now_utc = datetime.now(timezone.utc)
     today_midnight_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
-    end = today_midnight_utc                      # exclusive (this is "today", excluded)
-    start = end - timedelta(days=n)               # inclusive start for last n full days
+    end = today_midnight_utc
+    start = end - timedelta(days=n)
 
-    # precompute the exact dates we want
     valid_dates = pd.date_range(start=start.date(), end=(end.date() - timedelta(days=1)), freq="D").date
 
     frames = []
@@ -57,11 +73,11 @@ def get_last_n_days_excluding_today(n: int = 3, products = PRODUCTS) -> pd.DataF
         df = _fetch(p, start, end)
         if df.empty:
             continue
-        # Keep only the exact date range, just in case
+        # precise date filter
         df = df[df["date"].isin(valid_dates)].copy()
 
-        # ---- Basic per-product cleanup (numeric coercion + drop incomplete) ----
-        must = ["open","high","low","close","volume"]
+        # numeric coercion + drop incomplete
+        must = ["open","close"]
         df[must] = df[must].apply(pd.to_numeric, errors="coerce")
         df.replace([np.inf, -np.inf], np.nan, inplace=True)
         df.dropna(subset=must, inplace=True)
@@ -69,27 +85,18 @@ def get_last_n_days_excluding_today(n: int = 3, products = PRODUCTS) -> pd.DataF
         frames.append(df)
 
     if not frames:
-        return pd.DataFrame(columns=["date","product_id","open","high","low","close","volume"])
+        return pd.DataFrame(columns=["date","product_id","open","close"])
 
     out = pd.concat(frames, ignore_index=True)
 
-    # ---- FINAL HARD SANITIZER (prevents NaN/Inf in JSON uploads) ----
-    numeric = ["open","high","low","close","volume"]
-    # Coerce again post-concat (concat can upcast types)
-    out[numeric] = out[numeric].apply(pd.to_numeric, errors="coerce")
+    # final sanitize
+    out[["open","close"]] = out[["open","close"]].apply(pd.to_numeric, errors="coerce")
     out.replace([np.inf, -np.inf], np.nan, inplace=True)
-    out.dropna(subset=numeric, inplace=True)
+    out.dropna(subset=["open","close"], inplace=True)
 
-    # Canonical types
-    out["date"] = pd.to_datetime(out["date"]).dt.date     # Python date
+    out["date"] = pd.to_datetime(out["date"]).dt.date
     out["product_id"] = out["product_id"].astype(str)
-    out = out.astype({c: float for c in numeric})
 
-    # Enforce order, sort, reset index
-    out = out[["date","product_id","open","high","low","close","volume"]]
-    out = out.sort_values(["date","product_id"]).reset_index(drop=True)
-
-    # Belt & suspenders: assert no NaNs remain
+    out = out[["date","product_id","open","close"]].sort_values(["date","product_id"]).reset_index(drop=True)
     assert not out.isnull().any().any(), "NaN detected after sanitization."
-
     return out

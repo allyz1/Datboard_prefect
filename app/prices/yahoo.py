@@ -1,4 +1,3 @@
-# app/prices/yfinance_daily.py
 #!/usr/bin/env python3
 # pip install yfinance pandas numpy python-dateutil
 from __future__ import annotations
@@ -19,13 +18,15 @@ def get_last_n_days_excluding_today_yf(
     """
     Returns daily OHLCV (plus adj_close) for the last `n` fully completed UTC days,
     excluding today, for the given tickers. Columns:
-    ['date','ticker','open','high','low','close','adj_close','volume']
+    ['date','ticker','open','close','adj_close','volume']
     """
     end = _utc_midnight()                 # exclusive (today), so today is excluded
     start = end - timedelta(days=n)       # inclusive start
     tickers = list(tickers)
+    cols = ["date","ticker","open","close","adj_close","volume"]
+
     if not tickers:
-        return pd.DataFrame(columns=["date","ticker","open","high","low","close","adj_close","volume"])
+        return pd.DataFrame(columns=cols)
 
     # Download once (batched); yfinance returns multi-index columns for multiple tickers
     raw = yf.download(
@@ -51,27 +52,25 @@ def get_last_n_days_excluding_today_yf(
                 continue
             df_t.index = pd.DatetimeIndex(df_t.index).tz_localize(None)
             df_t = df_t.reset_index().rename(columns={
-                "Date":"date", "Open":"open", "High":"high", "Low":"low",
+                "Date":"date", "Open":"open",
                 "Close":"close", "Adj Close":"adj_close", "Volume":"volume"
             })
             df_t["ticker"] = t
-            frames.append(df_t[["date","ticker","open","high","low","close","adj_close","volume"]])
-        out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
-            columns=["date","ticker","open","high","low","close","adj_close","volume"]
-        )
+            frames.append(df_t[cols])
+        out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=cols)
     else:
         # Single ticker
         t = tickers[0]
         out = raw.copy()
         if out.empty:
-            return pd.DataFrame(columns=["date","ticker","open","high","low","close","adj_close","volume"])
+            return pd.DataFrame(columns=cols)
         out.index = pd.DatetimeIndex(out.index).tz_localize(None)
         out = out.reset_index().rename(columns={
-            "Date":"date", "Open":"open", "High":"high", "Low":"low",
+            "Date":"date", "Open":"open",
             "Close":"close", "Adj Close":"adj_close", "Volume":"volume"
         })
         out["ticker"] = t
-        out = out[["date","ticker","open","high","low","close","adj_close","volume"]]
+        out = out[cols]
 
     if out.empty:
         return out
@@ -82,10 +81,12 @@ def get_last_n_days_excluding_today_yf(
     out = out[out["date"].isin(valid_dates)].copy()
 
     # Sanitize numerics
-    numeric = ["open","high","low","close","adj_close","volume"]
+    numeric = ["open","close","adj_close","volume"]
     out[numeric] = out[numeric].apply(pd.to_numeric, errors="coerce")
     out.replace([np.inf, -np.inf], np.nan, inplace=True)
-    out.dropna(subset=["open","high","low","close","volume"], inplace=True)
+
+    # Require open/close/volume; adj_close can be missing for some tickers
+    out.dropna(subset=["open","close","volume"], inplace=True)
 
     # Sort
     out.sort_values(["ticker","date"], inplace=True, ignore_index=True)

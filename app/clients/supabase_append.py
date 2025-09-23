@@ -181,3 +181,123 @@ def concat_and_upload(
     return upload_df_by_key(
         table, df, chunk_size=chunk_size, do_update=do_update, precheck=True
     )
+# ===== ATM_raw upload helpers (ADD THIS SECTION) =====
+
+# Columns coming from your ATM timeline df:
+ATM_RAW_COLS = [
+    "ticker","filingDate","form","accessionNumber","doc_kind","event_type_final",
+    "program_cap_text","program_cap_usd",
+    "sold_to_date_shares_text","sold_to_date_shares",
+    "sold_to_date_gross_text","sold_to_date_gross_usd",
+    "commission_pct","agents","source_url","snippet","as_of_doc_date_hint",
+]
+
+def prep_atm_raw_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize ATM timeline DataFrame for insertion into ATM_raw.
+    Does NOT require a 'key' column (primary key is DB-generated).
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=ATM_RAW_COLS)
+
+    out = df.copy()
+
+    # Ensure all expected columns exist (fill missing with NA)
+    for c in ATM_RAW_COLS:
+        if c not in out.columns:
+            out[c] = pd.NA
+    out = out[ATM_RAW_COLS]
+
+    # Types / cleaning
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    out["form"] = out["form"].astype(str).str.upper()
+    out["doc_kind"] = out["doc_kind"].astype(str)
+
+    # Dates -> ISO date (string)
+    out["filingDate"] = pd.to_datetime(out["filingDate"], errors="coerce").dt.date.astype("string")
+    out["as_of_doc_date_hint"] = out["as_of_doc_date_hint"].astype("string")
+
+    # Numeric coercions
+    for c in ("program_cap_usd","sold_to_date_shares","sold_to_date_gross_usd","commission_pct"):
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    # Text-like fields
+    for c in ("program_cap_text","sold_to_date_shares_text","sold_to_date_gross_text",
+              "agents","source_url","snippet","event_type_final","accessionNumber"):
+        out[c] = out[c].astype("string")
+
+    # Drop rows missing critical identifiers
+    out = out.dropna(subset=["ticker", "accessionNumber", "source_url"], how="any")
+
+    # De-dupe exact duplicates
+    out = out.drop_duplicates(keep="last").reset_index(drop=True)
+    return out
+
+
+def insert_atm_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Append-only insert into ATM_raw. Relies on DB auto PK.
+    Use when you don't have a unique index/constraint for upserts.
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+
+    sb = get_supabase()
+    df2 = prep_atm_raw_df(df)
+
+    if df2.empty:
+        return {"attempted": 0, "sent": 0}
+
+    payload = [ _normalize_row(r) for r in df2.to_dict(orient="records") ]
+
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i + chunk_size]
+        sb.table(table).insert(batch).execute()  # append
+        sent += len(batch)
+
+    return {"attempted": len(df2), "sent": sent}
+
+
+def upsert_atm_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    on_conflict: str,
+    do_update: bool = False,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Idempotent upload using Postgres ON CONFLICT.
+    Requires a UNIQUE index/constraint backing `on_conflict`.
+
+    Example `on_conflict`:
+      - "uniq_atm_raw" (constraint/index name), or
+      - "accessionNumber,source_url,event_type_final" (column list)
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+
+    sb = get_supabase()
+    df2 = prep_atm_raw_df(df)
+
+    if df2.empty:
+        return {"attempted": 0, "sent": 0}
+
+    payload = [ _normalize_row(r) for r in df2.to_dict(orient="records") ]
+
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i + chunk_size]
+        sb.table(table).upsert(
+            batch,
+            on_conflict=on_conflict,
+            ignore_duplicates=(not do_update),
+            returning="minimal",
+        ).execute()
+        sent += len(batch)
+
+    return {"attempted": len(df2), "sent": sent}

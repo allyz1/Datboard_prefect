@@ -16,6 +16,11 @@ from app.crawlers.btcs_daily import get_btcs_eth_holdings_df
 from app.pipelines.ETH_SEC_holdings_main import get_sec_eth_holdings_df
 from app.pipelines.BTC_SEC_holdings_main import get_sec_btc_holdings_df
 
+# ⬇️ NEW: ATM timeline + Supabase ATM helpers
+# If your sec_atm_timeline_multi.py lives elsewhere, adjust the import path accordingly.
+from app.sec.ATM_daily import collect_timelines
+from app.clients.supabase_append import insert_atm_raw_df, upsert_atm_raw_df
+
 # ⬇️ Add this import (your helper saved under app/prices/)
 from app.prices.coinbase import get_last_n_days_excluding_today  # returns df with date, product_id, open, high, low, close, volume
 
@@ -72,9 +77,49 @@ def t_yfinance_prices() -> pd.DataFrame:
     cols = ["date","ticker","open","high","low","close","adj_close","volume"]
     return df.reindex(columns=cols)
 
+# ---------------- NEW: ATM tasks ----------------
+@task(retries=2, retry_delay_seconds=60)
+def t_atm_timeline(tickers: list[str], hours: int = 24) -> pd.DataFrame:
+    """
+    Build the ATM timeline DataFrame for the last `hours` hours.
+    """
+    df = collect_timelines(
+        tickers=tickers,
+        since_hours=hours,
+        forms="8-K,S-1,S-3,S-3ASR,424B5",
+        limit=600,
+        max_docs=6,
+        max_snippets_per_filing=4,
+    )
+    return df
+
+@task(retries=2, retry_delay_seconds=60)
+def t_upload_atm(df: pd.DataFrame, upsert: bool = False) -> dict:
+    """
+    Upload ATM df to Supabase ATM_raw.
+    - append-only by default
+    - if upsert=True, requires a unique index (e.g., uniq_atm_raw on accessionNumber, source_url, event_type_final)
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+
+    if upsert:
+        # If you created the index:
+        #   create unique index if not exists uniq_atm_raw
+        #   on "ATM_raw" ("accessionNumber","source_url","event_type_final");
+        return upsert_atm_raw_df("ATM_raw", df, on_conflict="uniq_atm_raw", do_update=False)
+    else:
+        return insert_atm_raw_df("ATM_raw", df)
+
 
 @flow(name="daily-main-pipeline", log_prints=True)
-def daily_main_pipeline(table: str = DEFAULT_TABLE, do_update: bool = False):
+def daily_main_pipeline(
+    table: str = DEFAULT_TABLE,
+    do_update: bool = False,
+    atm_tickers: list[str] | None = None,
+    atm_hours: int = 24,
+    atm_do_upsert: bool = False,
+):
     logger = get_run_logger()
 
     # 1) Run holdings producers in parallel
@@ -124,7 +169,27 @@ def daily_main_pipeline(table: str = DEFAULT_TABLE, do_update: bool = False):
         else:
             logger.warning("[Prices -> yfinance] No rows produced for last 3 days.")
             yf_stats = None
-    return {"holdings": stats_holdings, "coinbase": stats_cb if not coinbase_df.empty else None, "yfinance": yf_stats}
+            
+            # 5) ⬇️ NEW: ATM timeline → ATM_raw
+        if atm_tickers is None:
+            # sensible default set; adjust as you like
+            atm_tickers = ["DFDV", "UPXI", "BMNR", "BTBT", "ETHZ", "MARA", "RIOT"]
+
+        atm_df = t_atm_timeline.submit(atm_tickers, hours=atm_hours).result()
+        if atm_df is not None and not atm_df.empty:
+            atm_stats = t_upload_atm.submit(atm_df, upsert=atm_do_upsert).result()
+            logger.info(f"[ATM_raw] attempted={atm_stats.get('attempted', 0)} sent={atm_stats.get('sent', 0)}")
+        else:
+            logger.info("[ATM_raw] No ATM rows in requested window.")
+            atm_stats = {"attempted": 0, "sent": 0}
+
+        return {
+            "holdings": stats_holdings,
+            "coinbase": stats_cb,
+            "yfinance": yf_stats,
+            "atm_raw": atm_stats,
+        }
+
 
 if __name__ == "__main__":
     daily_main_pipeline()

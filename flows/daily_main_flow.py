@@ -25,6 +25,13 @@ from app.pipelines.BTC_SEC_holdings_main import get_sec_btc_holdings_df
 from app.sec.ATM_daily import collect_timelines
 from app.clients.supabase_append import insert_atm_raw_df, upsert_atm_raw_df
 
+# === NEW: SEC cash daily + Noncrypto upload ===
+from app.sec.cash_daily import (
+    collect_recent_accessions,
+    collect_cash_from_balance_sheets,
+)
+from app.clients.supabase_append import upload_noncrypto_from_cash
+
 DEFAULT_TABLE = "Holdings_raw"
 DEFAULT_TICKERS = ["MSTR","CEP","SMLR","NAKA","BMNR","SBET","ETHZ","BTCS","SQNS","BTBT","DFDV","UPXI"]
 
@@ -139,6 +146,104 @@ def t_upload_atm(df: pd.DataFrame, upsert: bool = False) -> dict:
         return upsert_atm_raw_df("ATM_raw", df, on_conflict="uniq_atm_raw", do_update=False)
     else:
         return insert_atm_raw_df("ATM_raw", df)
+# ---------------- NEW: SEC cash → Noncrypto_holdings_raw ----------------
+def _cash_recent_for_ticker(
+    ticker: str,
+    recent_hours: int,
+    forms: str,
+    from_date: str,
+    limit_filings: int,
+    year: int,
+    year_by: str,
+    max_docs_per_filing: int,
+    log_every: int,
+    diagnostics: bool,
+) -> pd.DataFrame:
+    # Probe which accessions had any file touched in the window
+    accs = collect_recent_accessions(
+        ticker=ticker,
+        forms=forms,
+        from_date=from_date,
+        limit_filings=limit_filings,
+        recent_hours=recent_hours,
+        year=year,
+        year_by=year_by,
+    )
+    if not accs:
+        return pd.DataFrame()
+
+    # Run extractor and filter to those accessions
+    df_all, _ = collect_cash_from_balance_sheets(
+        ticker=ticker,
+        forms=forms,
+        from_date=from_date,
+        limit_filings=limit_filings,
+        max_docs_per_filing=max_docs_per_filing,
+        log_every=log_every,
+        diagnostics=diagnostics,
+        year=year,
+        year_by=year_by,
+    )
+    if df_all is None or df_all.empty:
+        return pd.DataFrame()
+
+    return df_all[df_all["accessionNumber"].astype(str).isin(accs)].copy()
+
+    
+@task(retries=2, retry_delay_seconds=60)
+def t_sec_cash_noncrypto(
+    tickers: list[str],
+    recent_hours: int = 24,
+    forms: str = "10-K,10-Q,20-F,6-K",
+    from_date: str = "2024-01-01",
+    year: int = 2025,
+    year_by: str = "accession",
+    limit_filings: int = 300,
+    max_docs_per_filing: int = 12,
+    prefer_combined_if_missing: bool = False,
+    do_update: bool = False,
+) -> dict:
+    """
+    Produce cash-like holdings from SEC docs that changed in the last `recent_hours`,
+    then upload them to Noncrypto_holdings_raw.
+    """
+    logger = get_run_logger()
+    frames: list[pd.DataFrame] = []
+
+    for tk in tickers:
+        logger.info(f"[SEC cash] probe+extract {tk} (last {recent_hours}h)")
+        df_cash = _cash_recent_for_ticker(
+            ticker=tk,
+            recent_hours=recent_hours,
+            forms=forms,
+            from_date=from_date,
+            limit_filings=limit_filings,
+            year=year,
+            year_by=year_by,
+            max_docs_per_filing=max_docs_per_filing,
+            log_every=10,
+            diagnostics=False,
+        )
+        if df_cash is None or df_cash.empty:
+            logger.info(f"[SEC cash] {tk}: 0 rows in window")
+            continue
+        frames.append(df_cash)
+
+    if not frames:
+        logger.warning("[SEC cash] No cash rows produced in requested window.")
+        return {"attempted": 0, "skipped_existing": 0, "sent": 0}
+
+    cash_df = pd.concat(frames, ignore_index=True)
+    stats = upload_noncrypto_from_cash(
+        cash_df,
+        table="Noncrypto_holdings_raw",
+        do_update=do_update,
+        prefer_combined_if_missing=prefer_combined_if_missing,
+        precheck=True,
+    )
+    logger.info(f"[Noncrypto_holdings_raw] attempted={stats['attempted']} "
+                f"skipped={stats['skipped_existing']} sent={stats['sent']}")
+    return stats
 
 # ---------------- Flow ----------------
 @flow(name="daily-main-pipeline", log_prints=True)
@@ -148,6 +253,7 @@ def daily_main_pipeline(
     tickers: list[str] | None = None,       # <- single list used for Polygon + ATM
     atm_hours: int = 24,
     atm_do_upsert: bool = False,
+    sec_cash_hours: int = 24,
 ):
     logger = get_run_logger()
     tickers = tickers or DEFAULT_TICKERS
@@ -207,11 +313,26 @@ def daily_main_pipeline(
         logger.info("[ATM_raw] No ATM rows in requested window.")
         atm_stats = {"attempted": 0, "sent": 0}
 
+    # 6) NEW: SEC cash → Noncrypto_holdings_raw
+    noncrypto_stats = t_sec_cash_noncrypto.submit(
+        tickers=tickers,
+        recent_hours=sec_cash_hours,
+        forms="10-K,10-Q,20-F,6-K",
+        from_date="2024-01-01",
+        year=2025,
+        year_by="accession",
+        limit_filings=300,
+        max_docs_per_filing=12,
+        prefer_combined_if_missing=False,
+        do_update=False,
+    ).result()
+
     return {
         "holdings": stats_holdings,
         "coinbase": stats_cb,
         "polygon": polygon_stats,
         "atm_raw": atm_stats,
+        "noncrypto_holdings": noncrypto_stats,
     }
 
 if __name__ == "__main__":

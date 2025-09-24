@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# sec_cash_from_bs_ixbrl.py
-# Extract cash / cash-like holdings from BALANCE SHEET tables in SEC HTML/iXBRL docs
-# OR (new) quickly probe for files published in the past N hours via index.json "last-modified".
+# app/sec/cash_daily.py
+# Extract cash / cash-like holdings from BALANCE SHEET tables in SEC HTML/iXBRL docs.
+# Daily default probes accessions touched in the past N hours via index.json "last-modified"
+# and extracts cash ONLY for those accessions.
 #
 # pip install requests lxml pandas
 
@@ -12,7 +13,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import pandas as pd
 import requests
@@ -106,8 +107,7 @@ def fetch_filings(cik: str) -> pd.DataFrame:
             df[col] = pd.to_datetime(df[col], errors="coerce")
     if "acceptanceDateTime" in df.columns:
         s = pd.to_datetime(df["acceptanceDateTime"], utc=True, errors="coerce")
-        # keep naive UTC for comparisons
-        df["acceptanceDateTime"] = s.dt.tz_convert(None)
+        df["acceptanceDateTime"] = s.dt.tz_convert(None)  # naive UTC
     df["form"] = df["form"].astype(str)
     return df
 
@@ -129,12 +129,10 @@ def list_filing_files(cik_10: str, accession: str) -> pd.DataFrame:
         return df
     df["url"] = df["name"].apply(lambda n: urljoin(base, n))
     df["base_url"] = base
-    # normalize last-modified to datetime (naive UTC)
     if "last-modified" in df.columns:
         df["last_modified"] = pd.to_datetime(df["last-modified"], utc=True, errors="coerce").dt.tz_convert(None)
     else:
         df["last_modified"] = pd.NaT
-    # normalize size
     if "size" in df.columns:
         df["size"] = pd.to_numeric(df["size"], errors="coerce")
     return df
@@ -144,7 +142,7 @@ def is_html_like(name: str) -> bool:
     return n.endswith((".htm", ".html", ".xhtml"))
 
 # =========================
-# HTML/iXBRL parsing utils (unchanged)
+# HTML/iXBRL parsing utils
 # =========================
 def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
@@ -212,7 +210,7 @@ def percent_numeric(vals: List[str]) -> float:
     return n / len(vals)
 
 # =========================
-# Money parsing + helpers (unchanged)
+# Money parsing + helpers
 # =========================
 def parse_money(s: str) -> Optional[float]:
     if s is None:
@@ -311,7 +309,7 @@ def detect_unit_multiplier(context_text: str) -> float:
     return 1.0
 
 # =========================
-# Balance sheet detection & extraction (unchanged)
+# Balance sheet detection & extraction
 # =========================
 HEAD_TERMS = (
     "balance sheet",
@@ -539,7 +537,7 @@ def extract_cash_from_ixbrl_root(root: etree._Element) -> Dict[str, Any]:
     return out
 
 # =========================
-# Scanner (unchanged)
+# Scanner
 # =========================
 def scan_doc_for_balance_sheet_and_extract(
     html_bytes: bytes, diag: bool = False, doc_url: str = ""
@@ -666,7 +664,7 @@ def pull_ix_meta(root: etree._Element) -> Dict[str, Any]:
         return {}
 
 # =========================
-# URL candidates (unchanged)
+# URL candidates
 # =========================
 def candidate_html_urls(files_df: pd.DataFrame, primary_doc: str, prelimit: Optional[int]) -> List[str]:
     if files_df.empty:
@@ -696,7 +694,7 @@ def candidate_html_urls(files_df: pd.DataFrame, primary_doc: str, prelimit: Opti
     return urls
 
 # =========================
-# Cash collection (unchanged)
+# Cash collection (with optional accession whitelist)
 # =========================
 def collect_cash_from_balance_sheets(
     ticker: str,
@@ -708,6 +706,7 @@ def collect_cash_from_balance_sheets(
     diagnostics: bool = False,
     year: int = 0,
     year_by: str = "accession",
+    accession_whitelist: Optional[Set[str]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     cik = resolve_cik(ticker)
     filings = fetch_filings(cik)
@@ -716,17 +715,12 @@ def collect_cash_from_balance_sheets(
 
     allowed = {f.strip().upper() for f in forms.split(",") if f.strip()}
     subset = filings[
-        filings["form"]
-        .str.upper()
-        .apply(lambda fu: any(fu == a or fu.startswith(a + "/") for a in allowed))
+        filings["form"].str.upper().apply(lambda fu: any(fu == a or fu.startswith(a + "/") for a in allowed))
     ].copy()
 
     subset["acc_year"] = (
-        subset["accessionNumber"]
-        .astype(str)
-        .str.extract(r"^\d{10}-(\d{2})-")[0]
-        .astype("float")
-        .apply(lambda y: 2000 + int(y) if pd.notna(y) else pd.NA)
+        subset["accessionNumber"].astype(str).str.extract(r"^\d{10}-(\d{2})-")[0]
+        .astype("float").apply(lambda y: 2000 + int(y) if pd.notna(y) else pd.NA)
     )
 
     if year and int(year) > 0:
@@ -737,6 +731,9 @@ def collect_cash_from_balance_sheets(
     else:
         floor_year = pd.Timestamp(from_date).year
         subset = subset[subset["acc_year"].ge(floor_year)]
+
+    if accession_whitelist:
+        subset = subset[subset["accessionNumber"].isin(accession_whitelist)]
 
     subset = subset.sort_values("filingDate").tail(limit_filings)
     if subset.empty:
@@ -820,9 +817,9 @@ def collect_cash_from_balance_sheets(
     return df, diag_df
 
 # =========================
-# NEW: Recent-files probe
+# DAILY PROBE: collect accessions touched in last N hours
 # =========================
-def collect_recent_files(
+def collect_recent_accessions(
     ticker: str,
     forms: str,
     from_date: str,
@@ -830,30 +827,21 @@ def collect_recent_files(
     recent_hours: int,
     year: int,
     year_by: str,
-) -> pd.DataFrame:
-    """
-    Fast path: for each filtered filing, hit index.json and return files
-    whose 'last-modified' is within the past `recent_hours`.
-    """
+) -> Set[str]:
     cutoff = datetime.datetime.utcnow() - datetime.timedelta(hours=recent_hours)
     cik = resolve_cik(ticker)
     filings = fetch_filings(cik)
     if filings.empty:
-        return pd.DataFrame()
+        return set()
 
     allowed = {f.strip().upper() for f in forms.split(",") if f.strip()}
     subset = filings[
-        filings["form"]
-        .str.upper()
-        .apply(lambda fu: any(fu == a or fu.startswith(a + "/") for a in allowed))
+        filings["form"].str.upper().apply(lambda fu: any(fu == a or fu.startswith(a + "/") for a in allowed))
     ].copy()
 
     subset["acc_year"] = (
-        subset["accessionNumber"]
-        .astype(str)
-        .str.extract(r"^\d{10}-(\d{2})-")[0]
-        .astype("float")
-        .apply(lambda y: 2000 + int(y) if pd.notna(y) else pd.NA)
+        subset["accessionNumber"].astype(str).str.extract(r"^\d{10}-(\d{2})-")[0]
+        .astype("float").apply(lambda y: 2000 + int(y) if pd.notna(y) else pd.NA)
     )
 
     if year and int(year) > 0:
@@ -867,9 +855,9 @@ def collect_recent_files(
 
     subset = subset.sort_values("filingDate").tail(limit_filings)
     if subset.empty:
-        return pd.DataFrame()
+        return set()
 
-    out_rows: List[Dict[str, Any]] = []
+    whitelist: Set[str] = set()
     for _, row in subset.iterrows():
         accession = row.get("accessionNumber")
         try:
@@ -877,212 +865,153 @@ def collect_recent_files(
         except Exception as e:
             log.warning(f"index.json fetch failed for {accession}: {e}")
             continue
-
-        if files.empty:
+        if files.empty or "last_modified" not in files.columns:
             continue
-
-        # filter on last_modified >= cutoff
-        if "last_modified" not in files.columns:
-            continue
-        recent = files[pd.to_datetime(files["last_modified"], errors="coerce") >= cutoff]
-        if recent.empty:
-            continue
-
-        for _, f in recent.iterrows():
-            out_rows.append(
-                {
-                    "ticker": ticker.upper(),
-                    "form": row.get("form"),
-                    "accessionNumber": accession,
-                    "filingDate": row.get("filingDate"),
-                    "name": f.get("name"),
-                    "url": f.get("url"),
-                    "last_modified": f.get("last_modified"),
-                    "size": f.get("size"),
-                }
-            )
-
-    if not out_rows:
-        return pd.DataFrame()
-    return pd.DataFrame(out_rows).sort_values(["last_modified", "ticker", "name"]).reset_index(drop=True)
+        if (pd.to_datetime(files["last_modified"], errors="coerce") >= cutoff).any():
+            whitelist.add(accession)
+    return whitelist
 
 # =========================
-# CLI
+# PUBLIC API (for Prefect flow)
 # =========================
+KEEP_COLS = [
+    "ticker","form","accessionNumber","filingDate","reportDate","source_url",
+    "cash_and_cash_equivalents_usd","marketable_securities_usd","short_term_investments_usd",
+    "us_treasuries_usd","government_securities_usd","restricted_cash_usd","stablecoins_usd",
+    "combined_cash_cash_eq_restricted_usd","cash_like_total_excl_restricted_usd","units_multiplier"
+]
+
+def get_sec_cash_daily_df(
+    tickers: List[str],
+    forms: str = "10-K,10-Q,20-F,6-K",
+    from_date: str = "2024-01-01",
+    limit_filings: int = 300,
+    max_docs_per_filing: int = 12,
+    diagnostics: bool = False,
+    year: int = 2025,
+    year_by: str = "accession",
+    recent_hours: int = 24,
+) -> pd.DataFrame:
+    """Daily default: probe recent accessions for each ticker, then extract cash just for those."""
+    frames: List[pd.DataFrame] = []
+    for t in (tickers or []):
+        log.info(f"=== DAILY TICKER {t} (probe last {recent_hours}h) ===")
+        acc_wh = collect_recent_accessions(
+            ticker=t,
+            forms=forms,
+            from_date=from_date,
+            limit_filings=limit_filings,
+            recent_hours=recent_hours,
+            year=year,
+            year_by=year_by,
+        )
+        if not acc_wh:
+            log.info(f"[{t}] No accessions touched in last {recent_hours}h.")
+            continue
+
+        df_t, _ = collect_cash_from_balance_sheets(
+            ticker=t,
+            forms=forms,
+            from_date=from_date,
+            limit_filings=limit_filings,
+            max_docs_per_filing=max_docs_per_filing,
+            log_every=10,
+            diagnostics=diagnostics,
+            year=year,
+            year_by=year_by,
+            accession_whitelist=acc_wh,
+        )
+        if not df_t.empty:
+            frames.append(df_t)
+
+    if not frames:
+        return pd.DataFrame(columns=KEEP_COLS)
+    out = pd.concat(frames, ignore_index=True)
+    return out[[c for c in KEEP_COLS if c in out.columns]]
+
+def get_sec_cash_full_df(
+    tickers: List[str],
+    forms: str = "10-K,10-Q,20-F,6-K",
+    from_date: str = "2024-01-01",
+    limit_filings: int = 300,
+    max_docs_per_filing: int = 12,
+    diagnostics: bool = False,
+    year: int = 2025,
+    year_by: str = "accession",
+) -> pd.DataFrame:
+    """Full scan (no probe)."""
+    frames: List[pd.DataFrame] = []
+    for t in (tickers or []):
+        df_t, _ = collect_cash_from_balance_sheets(
+            ticker=t,
+            forms=forms,
+            from_date=from_date,
+            limit_filings=limit_filings,
+            max_docs_per_filing=max_docs_per_filing,
+            log_every=10,
+            diagnostics=diagnostics,
+            year=year,
+            year_by=year_by,
+        )
+        if not df_t.empty:
+            frames.append(df_t)
+    if not frames:
+        return pd.DataFrame(columns=KEEP_COLS)
+    out = pd.concat(frames, ignore_index=True)
+    return out[[c for c in KEEP_COLS if c in out.columns]]
+
+# =========================
+# Minimal CLI (no files)
+# =========================
+def _parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description="Daily SEC cash extractor (no file writes).")
+    ap.add_argument("--tickers", default="MSTR,CEP,SMLR,NAKA,BMNR,SBET,ETHZ,BTCS,SQNS,BTBT,DFDV,UPXI")
+    ap.add_argument("--forms", default="10-K,10-Q,20-F,6-K")
+    ap.add_argument("--from-date", default="2024-01-01")
+    ap.add_argument("--limit", type=int, default=300)
+    ap.add_argument("--year", type=int, default=2025)
+    ap.add_argument("--year-by", choices=["accession","filingdate"], default="accession")
+    ap.add_argument("--max-docs", type=int, default=12)
+    ap.add_argument("--recent-hours", type=int, default=24)
+    ap.add_argument("--log-level", default="INFO", choices=["DEBUG","INFO","WARNING","ERROR"])
+    ap.add_argument("--diagnostics", action="store_true")
+    return ap.parse_args()
+
 def main():
-    ap = argparse.ArgumentParser(
-        description="Extract cash/cash-like holdings from SEC balance sheets (HTML/iXBRL) or probe for recently published files."
-    )
-
-    # Single-ticker fallback (kept for backward-compat)
-    ap.add_argument("--ticker", "-t", default="MSTR", help="Single ticker to scan (default: MSTR)")
-
-    # Batch ticker options
-    ap.add_argument(
-        "--tickers",
-        default="MSTR,CEP,SMLR,NAKA,BMNR,SBET,ETHZ,BTCS,SQNS,BTBT,DFDV,UPXI",
-        help="Comma-separated list of tickers, e.g. 'MSTR,CEP,SMLR'"
-    )
-    ap.add_argument("--tickers-file", default="", help="Optional path to a newline-delimited list of tickers")
-
-    # Core options
-    ap.add_argument("--forms", default="10-K,10-Q,20-F,6-K", help="Forms to include")
-    ap.add_argument("--from-date", default="2024-01-01", help="Inclusive floor date (ISO)")
-    ap.add_argument("--limit", type=int, default=300, help="Max filings to consider")
-
-    # Year filter
-    ap.add_argument("--year", type=int, default=2025, help="Restrict results to this calendar year.")
-    ap.add_argument("--year-by", choices=["accession", "filingdate"], default="accession",
-                    help="Year filter based on accession number or filingDate year.")
-
-    ap.add_argument("--max-docs", type=int, default=12, help="Max HTML docs to try per filing (0 = ALL)")
-    ap.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], help="Verbosity")
-    ap.add_argument("--diagnostics", action="store_true", help="Dump per-table diagnostics CSV next to output")
-
-    # NEW: quick probe mode
-    ap.add_argument("--recent-hours", type=int, default=24,
-                    help="Hours back for recent-file probe (default: 24). Set 0 to skip probe and run the extractor.")
-
-    # Output controls
-    ap.add_argument("--outfile", default="", help="CSV output path. If omitted, a default under data/ is used.")
-    ap.add_argument("--append", action="store_true", help="Append to --outfile if it exists (no header).")
-
-    args = ap.parse_args()
-
+    args = _parse_args()
     global log
     log = setup_logger(args.log_level)
 
-    # ---- Build ticker list (preserve order, dedupe) ----
-    tickers: list[str] = []
-    if args.tickers:
-        tickers.extend([t.strip().upper() for t in args.tickers.split(",") if t.strip()])
-    if args.tickers_file:
-        p = Path(args.tickers_file)
-        if p.exists():
-            tickers.extend([ln.strip().upper() for ln in p.read_text().splitlines() if ln.strip()])
-    if not tickers and args.ticker:
-        tickers = [args.ticker.strip().upper()]
-    seen = set()
-    tickers = [t for t in tickers if not (t in seen or seen.add(t))]
-    if not tickers:
-        raise SystemExit("No tickers provided. Use --ticker or --tickers / --tickers-file.")
+    tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
 
-    log.info(
-        f"Start: tickers={tickers} forms={args.forms} from={args.from_date} "
-        f"limit={args.limit} max_docs={args.max_docs or 'ALL'} diag={args.diagnostics} "
-        f"year={args.year} year_by={args.year_by} recent_hours={args.recent_hours}"
-    )
-    # =========================
-    # MODE A: Recent-files probe (default daily)
-    # =========================
     if args.recent_hours and args.recent_hours > 0:
-        all_recent = []
-        for t in tickers:
-            log.info(f"=== PROBE TICKER {t} (last {args.recent_hours}h) ===")
-            df_recent = collect_recent_files(
-                ticker=t,
-                forms=args.forms,
-                from_date=args.from_date,
-                limit_filings=args.limit,
-                recent_hours=args.recent_hours,
-                year=args.year,
-                year_by=args.year_by,
-            )
-            log.info(f"[{t}] recent files: {len(df_recent)}")
-            if not df_recent.empty:
-                all_recent.append(df_recent)
-
-        if not all_recent:
-            log.warning("No files with last-modified in the requested window.")
-            return
-
-        out_df = pd.concat(all_recent, ignore_index=True)
-
-        if not args.outfile:
-            stamp = datetime.datetime.utcnow().strftime("%Y%m%d")
-            args.outfile = f"data/RECENT_files_{args.recent_hours}h_{stamp}.csv"
-
-        out_path = Path(args.outfile)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = True
-        mode = "w"
-        if args.append and out_path.exists():
-            write_header = False
-            mode = "a"
-        out_df.to_csv(out_path, index=False, header=write_header, mode=mode)
-        log.info(f"Saved recent file rows={len(out_df)} -> {out_path.resolve()} (append={args.append})")
-        return
-
-    # =========================
-    # MODE B: Original cash-extraction pipeline (heavy)
-    # =========================
-    all_frames = []
-    all_diag_frames = []
-
-    for t in tickers:
-        log.info(f"=== TICKER {t} ===")
-        df, diag_df = collect_cash_from_balance_sheets(
-            ticker=t,
+        df = get_sec_cash_daily_df(
+            tickers=tickers,
             forms=args.forms,
             from_date=args.from_date,
             limit_filings=args.limit,
             max_docs_per_filing=args.max_docs,
-            log_every=1 if args.log_level == "DEBUG" else 10,
+            diagnostics=args.diagnostics,
+            year=args.year,
+            year_by=args.year_by,
+            recent_hours=args.recent_hours,
+        )
+        log.info(f"[DAILY] produced rows={len(df)}")
+    else:
+        df = get_sec_cash_full_df(
+            tickers=tickers,
+            forms=args.forms,
+            from_date=args.from_date,
+            limit_filings=args.limit,
+            max_docs_per_filing=args.max_docs,
             diagnostics=args.diagnostics,
             year=args.year,
             year_by=args.year_by,
         )
-        log.info(f"[{t}] rows: {len(df)}")
-        if not df.empty:
-            all_frames.append(df)
-        if args.diagnostics and not diag_df.empty:
-            all_diag_frames.append(diag_df)
+        log.info(f"[FULL] produced rows={len(df)}")
 
-    if not all_frames:
-        log.warning("No cash/balance-sheet rows found for any ticker.")
-        return
-
-    out_df = pd.concat(all_frames, ignore_index=True)
-    KEEP = [
-        "ticker","form","accessionNumber","filingDate","reportDate","source_url",
-        "cash_and_cash_equivalents_usd","marketable_securities_usd","short_term_investments_usd",
-        "us_treasuries_usd","government_securities_usd","restricted_cash_usd","stablecoins_usd",
-        "combined_cash_cash_eq_restricted_usd","cash_like_total_excl_restricted_usd",
-        "units_multiplier"
-    ]
-    out_df = out_df[[c for c in KEEP if c in out_df.columns]]
-
-    if not args.outfile:
-        stamp = datetime.datetime.utcnow().strftime("%Y%m%d")
-        if len(tickers) == 1:
-            args.outfile = f"data/{tickers[0]}_cash_from_bs_{stamp}.csv"
-        else:
-            args.outfile = f"data/ALL_cash_from_bs_{stamp}.csv"
-
-    out_path = Path(args.outfile)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    write_header = True
-    mode = "w"
-    if args.append and out_path.exists():
-        write_header = False
-        mode = "a"
-
-    out_df.to_csv(out_path, index=False, header=write_header, mode=mode)
-    log.info(f"Saved rows={len(out_df)} -> {out_path.resolve()} (append={args.append})")
-
-    if args.diagnostics:
-        diag_path = out_path.with_suffix(".diagnostics.csv")
-        if all_diag_frames:
-            diag_df = pd.concat(all_diag_frames, ignore_index=True)
-        else:
-            diag_df = pd.DataFrame()
-        d_write_header = True
-        d_mode = "w"
-        if args.append and diag_path.exists():
-            d_write_header = False
-            d_mode = "a"
-        diag_df.to_csv(diag_path, index=False, header=d_write_header, mode=d_mode)
-        log.info(f"Saved diagnostics rows={len(diag_df)} -> {diag_path.resolve()} (append={args.append})")
+    if not df.empty:
+        log.info("\n" + df.head(min(5, len(df))).to_string(index=False))
 
 if __name__ == "__main__":
     main()

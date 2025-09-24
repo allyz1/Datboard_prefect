@@ -301,3 +301,128 @@ def upsert_atm_raw_df(
         sent += len(batch)
 
     return {"attempted": len(df2), "sent": sent}
+
+# ===== Noncrypto_holdings_raw (from SEC cash extractor) =====
+
+NONCRYPTO_TABLE = "Noncrypto_holdings_raw"
+NONCRYPTO_ASSET_LABEL = "CASH_LIKE"
+
+def _nc_choose_asof_date(row: pd.Series) -> Optional[pd.Timestamp]:
+    """
+    Prefer the balance-sheet value column date, else reportDate, else filingDate.
+    Returns a *date* (no time).
+    """
+    for col in ("bs_value_column_date", "reportDate", "filingDate"):
+        val = pd.to_datetime(row.get(col), errors="coerce", utc=False)
+        if pd.notna(val):
+            return val.date()
+    return None
+
+def _nc_pick_cash_value(row: pd.Series, prefer_combined_if_missing: bool = False) -> Optional[float]:
+    """
+    Primary: cash_like_total_excl_restricted_usd
+    Fallback A: cash_and_cash_equivalents_usd
+    Optional Fallback B: combined_cash_cash_eq_restricted_usd (if prefer_combined_if_missing=True)
+    """
+    candidates = [
+        "cash_like_total_excl_restricted_usd",
+        "cash_and_cash_equivalents_usd",
+    ]
+    if prefer_combined_if_missing:
+        candidates.append("combined_cash_cash_eq_restricted_usd")
+
+    for col in candidates:
+        v = row.get(col)
+        try:
+            if v is not None and pd.notna(v):
+                return float(v)
+        except Exception:
+            continue
+    return None
+
+def prep_noncrypto_from_cash_df(
+    cash_df: pd.DataFrame,
+    asset_label: str = NONCRYPTO_ASSET_LABEL,
+    prefer_combined_if_missing: bool = False,
+) -> pd.DataFrame:
+    """
+    Transform the SEC cash extractor output into the schema required by
+    Noncrypto_holdings_raw: (date, ticker, asset, total_holdings).
+
+    - Chooses an 'as of' date per row (bs_value_column_date > reportDate > filingDate).
+    - Picks the best cash metric (see _nc_pick_cash_value).
+    - Dedupes to one row per (ticker, date) by taking the highest bs_score.
+    """
+    if cash_df is None or cash_df.empty:
+        return pd.DataFrame(columns=["date", "ticker", "asset", "total_holdings"])
+
+    df = cash_df.copy()
+
+    # Normalize numeric fields
+    for col in (
+        "cash_like_total_excl_restricted_usd",
+        "cash_and_cash_equivalents_usd",
+        "combined_cash_cash_eq_restricted_usd",
+        "bs_score",
+    ):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            if col == "bs_score":
+                df[col] = 0.0  # default when absent
+
+    # Derive as-of date + value
+    df["__asof_date"] = df.apply(_nc_choose_asof_date, axis=1)
+    df["__value"] = df.apply(
+        lambda r: _nc_pick_cash_value(r, prefer_combined_if_missing=prefer_combined_if_missing),
+        axis=1,
+    )
+
+    # Keep valid rows
+    df = df.dropna(subset=["ticker", "__asof_date", "__value"]).copy()
+
+    # Choose best row per (ticker, date) by highest bs_score
+    df["__rank"] = (
+        df.groupby(["ticker", "__asof_date"])["bs_score"]
+          .rank(method="first", ascending=False)
+    )
+    best = df[df["__rank"] == 1.0].copy()
+
+    out = pd.DataFrame({
+        "date": pd.to_datetime(best["__asof_date"], errors="coerce").dt.date.astype("string"),
+        "ticker": best["ticker"].astype(str).str.upper(),
+        "asset": asset_label,
+        "total_holdings": best["__value"].astype(float),
+    })
+
+    out = out.dropna(subset=["date", "ticker"])
+    out = out.drop_duplicates(subset=["date", "ticker"], keep="last").reset_index(drop=True)
+    return out[["date", "ticker", "asset", "total_holdings"]]
+
+def upload_noncrypto_from_cash(
+    cash_df: pd.DataFrame,
+    table: str = NONCRYPTO_TABLE,
+    chunk_size: int = 1000,
+    do_update: bool = False,
+    prefer_combined_if_missing: bool = False,
+    precheck: bool = True,
+) -> Dict[str, int]:
+    """
+    End-to-end helper:
+      - transform cash extractor rows -> Noncrypto_holdings_raw schema
+      - upsert by key (date,ticker) via upload_df_by_key()
+
+    Returns: {"attempted": int, "skipped_existing": int, "sent": int}
+    """
+    prepared = prep_noncrypto_from_cash_df(
+        cash_df,
+        asset_label=NONCRYPTO_ASSET_LABEL,
+        prefer_combined_if_missing=prefer_combined_if_missing,
+    )
+    return upload_df_by_key(
+        table=table,
+        df=prepared,
+        chunk_size=chunk_size,
+        do_update=do_update,
+        precheck=precheck,
+    )

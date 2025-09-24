@@ -549,6 +549,7 @@ def build_timeline_for_ticker(ticker: str, args) -> pd.DataFrame:
                     per_filing_hits.append({
                         "ticker": ticker,
                         "filingDate": filing_dt,
+                        "reportDate": row.get("reportDate"),
                         "form": filing_form,
                         "doc_kind": doc_kind,
                         "accessionNumber": accession,
@@ -588,7 +589,7 @@ def build_timeline_for_ticker(ticker: str, args) -> pd.DataFrame:
     ).reset_index(drop=True)
 
     tl_cols = [
-        "ticker","filingDate","form","accessionNumber","doc_kind",
+        "ticker","filingDate","reportDate","form","accessionNumber","doc_kind",
         "event_type_final",
         "program_cap_text","program_cap_usd",
         "sold_to_date_shares_text","sold_to_date_shares",
@@ -610,6 +611,7 @@ def build_timeline_for_ticker(ticker: str, args) -> pd.DataFrame:
         timeline.append({
             "ticker": r.get("ticker"),
             "filingDate": r.get("filingDate"),
+            "reportDate": r.get("reportDate"),
             "form": r.get("form"),
             "accessionNumber": r.get("accessionNumber"),
             "doc_kind": r.get("doc_kind"),

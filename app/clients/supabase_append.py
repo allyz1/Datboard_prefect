@@ -4,7 +4,6 @@ from functools import lru_cache
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Sequence, List, Dict, Optional
-import hashlib
 
 import numpy as np
 import pandas as pd
@@ -58,19 +57,7 @@ def _normalize_row(row: dict, *, drop_key: bool = True) -> dict:
         row = {k: v for k, v in row.items() if k != "key"}
     return {k: _json_safe(v) for k, v in row.items()}
 
-def _stable_int64(s: str) -> int:
-    h = hashlib.blake2b(s.encode("utf-8"), digest_size=8).digest()
-    v = int.from_bytes(h, "big")
-    return v & ((1 << 63) - 1)  # positive 63-bit
 
-def _atm_row_fingerprint(row: dict) -> str:
-    return "|".join([
-        str(row.get("ticker","")).upper().strip(),
-        str(row.get("accessionNumber","")).strip(),
-        str(row.get("event_type_final","")).lower().strip(),
-        str(row.get("source_url","")).strip(),
-    ])
-    
 def _require_cols(df: pd.DataFrame, cols: Sequence[str]) -> None:
     missing = [c for c in cols if c not in df.columns]
     if missing:
@@ -200,7 +187,7 @@ def concat_and_upload(
 
 # Columns coming from your ATM timeline df:
 ATM_RAW_COLS = [
-    "key","ticker","filingDate","form","accessionNumber","doc_kind","event_type_final",
+    "ticker","filingDate","form","accessionNumber","doc_kind","event_type_final",
     "program_cap_text","program_cap_usd",
     "sold_to_date_shares_text","sold_to_date_shares",
     "sold_to_date_gross_text","sold_to_date_gross_usd",
@@ -208,67 +195,105 @@ ATM_RAW_COLS = [
 ]
 
 def prep_atm_raw_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize ATM timeline DataFrame for insertion into ATM_raw.
+    Does NOT require a 'key' column (primary key is DB-generated).
+    """
     if df is None or df.empty:
         return pd.DataFrame(columns=ATM_RAW_COLS)
 
     out = df.copy()
-    base_cols = [c for c in ATM_RAW_COLS if c != "key"]
-    for c in base_cols:
+
+    # Ensure all expected columns exist (fill missing with NA)
+    for c in ATM_RAW_COLS:
         if c not in out.columns:
             out[c] = pd.NA
+    out = out[ATM_RAW_COLS]
 
+    # Types / cleaning
     out["ticker"] = out["ticker"].astype(str).str.upper()
     out["form"] = out["form"].astype(str).str.upper()
     out["doc_kind"] = out["doc_kind"].astype(str)
+
+    # Dates -> ISO date (string)
     out["filingDate"] = pd.to_datetime(out["filingDate"], errors="coerce").dt.date.astype("string")
     out["as_of_doc_date_hint"] = out["as_of_doc_date_hint"].astype("string")
+
+    # Numeric coercions
     for c in ("program_cap_usd","sold_to_date_shares","sold_to_date_gross_usd","commission_pct"):
         out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    # Text-like fields
     for c in ("program_cap_text","sold_to_date_shares_text","sold_to_date_gross_text",
               "agents","source_url","snippet","event_type_final","accessionNumber"):
         out[c] = out[c].astype("string")
 
-    out = out.dropna(subset=["ticker","accessionNumber","source_url"], how="any")
+    # Drop rows missing critical identifiers
+    out = out.dropna(subset=["ticker", "accessionNumber", "source_url"], how="any")
 
-    key_series = (
-        out.apply(lambda r: _stable_int64(_atm_row_fingerprint(r.to_dict())), axis=1)
-           .astype("Int64")
-    )
-    out.insert(0, "key", key_series)
-    out = out.drop_duplicates(subset=["key"], keep="last").reset_index(drop=True)
+    # De-dupe exact duplicates
+    out = out.drop_duplicates(keep="last").reset_index(drop=True)
+    return out
 
-    for c in ATM_RAW_COLS:
-        if c not in out.columns:
-            out[c] = pd.NA
-    return out[ATM_RAW_COLS]
 
-def insert_atm_raw_df(table: str, df: pd.DataFrame, chunk_size: int = 500) -> dict:
+def insert_atm_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Append-only insert into ATM_raw. Relies on DB auto PK.
+    Use when you don't have a unique index/constraint for upserts.
+    """
     if df is None or df.empty:
         return {"attempted": 0, "sent": 0}
+
     sb = get_supabase()
     df2 = prep_atm_raw_df(df)
+
     if df2.empty:
         return {"attempted": 0, "sent": 0}
-    payload = [_normalize_row(r, drop_key=False) for r in df2.to_dict(orient="records")]
+
+    payload = [ _normalize_row(r) for r in df2.to_dict(orient="records") ]
+
     sent = 0
     for i in range(0, len(payload), chunk_size):
-        batch = payload[i:i+chunk_size]
-        sb.table(table).insert(batch).execute()
+        batch = payload[i:i + chunk_size]
+        sb.table(table).insert(batch).execute()  # append
         sent += len(batch)
+
     return {"attempted": len(df2), "sent": sent}
 
-def upsert_atm_raw_df(table: str, df: pd.DataFrame, on_conflict: str = "key",
-                      do_update: bool = False, chunk_size: int = 500) -> dict:
+
+def upsert_atm_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    on_conflict: str,
+    do_update: bool = False,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Idempotent upload using Postgres ON CONFLICT.
+    Requires a UNIQUE index/constraint backing `on_conflict`.
+
+    Example `on_conflict`:
+      - "uniq_atm_raw" (constraint/index name), or
+      - "accessionNumber,source_url,event_type_final" (column list)
+    """
     if df is None or df.empty:
         return {"attempted": 0, "sent": 0}
+
     sb = get_supabase()
     df2 = prep_atm_raw_df(df)
+
     if df2.empty:
         return {"attempted": 0, "sent": 0}
-    payload = [_normalize_row(r, drop_key=False) for r in df2.to_dict(orient="records")]
+
+    payload = [ _normalize_row(r) for r in df2.to_dict(orient="records") ]
+
     sent = 0
     for i in range(0, len(payload), chunk_size):
-        batch = payload[i:i+chunk_size]
+        batch = payload[i:i + chunk_size]
         sb.table(table).upsert(
             batch,
             on_conflict=on_conflict,
@@ -276,8 +301,8 @@ def upsert_atm_raw_df(table: str, df: pd.DataFrame, on_conflict: str = "key",
             returning="minimal",
         ).execute()
         sent += len(batch)
-    return {"attempted": len(df2), "sent": sent}
 
+    return {"attempted": len(df2), "sent": sent}
 
 # ===== Noncrypto_holdings_raw (from SEC cash extractor) =====
 

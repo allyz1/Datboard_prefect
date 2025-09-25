@@ -295,18 +295,82 @@ def pick_value_column(rows: List[List[str]], prefer: str = "latest") -> int:
 
     return min(candidates)
 
+def unit_context_around_table(table: etree._Element, max_prev: int = 30,    max_next: int = 10) -> str:
+    """Collect text likely to contain unit hints near the table:
+       - caption text
+       - up to `max_prev` previous element siblings (skipping non-elements)
+       - up to `max_next` next siblings
+       - text from thead/th header cells
+       - small walk up the ancestor chain (parents' preceding text)
+    """
+    blobs: List[str] = []
+
+    cap = table.find(".//caption")
+    if cap is not None:
+        blobs.append(_join_text(cap))
+
+    # Header cells (many issuers stick the units in a header row)
+    for hdr_cell in table.xpath(".//thead//th|.//tr[1]//th"):
+        blobs.append(_join_text(hdr_cell))
+
+    # Previous siblings (wider than before)
+    prev = table.getprevious()
+    hops = 0
+    while prev is not None and hops < max_prev:
+        if hasattr(prev, "tag") and isinstance(prev.tag, str):
+            blobs.append(_join_text(prev))
+        prev = prev.getprevious()
+        hops += 1
+
+    # Next siblings (occasionally the units are below the title line)
+    nxt = table.getnext()
+    hops = 0
+    while nxt is not None and hops < max_next:
+        if hasattr(nxt, "tag") and isinstance(nxt.tag, str):
+            blobs.append(_join_text(nxt))
+        nxt = nxt.getnext()
+        hops += 1
+
+    # Walk up to 3 ancestors and include their preceding text
+    anc = table.getparent()
+    levels = 0
+    while anc is not None and levels < 3:
+        blobs.append(_join_text(anc))
+        levels += 1
+        anc = anc.getparent()
+
+    return _clean(" ".join(b for b in blobs if b))
+
+
+_UNIT_RX = re.compile(
+    r"""
+    (?:^|\s|\()                                   # start/boundary
+    (?:\$?\s*(?:amounts?|figures?)\s+)?           # optional: "$ amounts"/"figures"
+    in\s+                                         # "in"
+    (?:thousand(?:s)?|million(?:s)?|billion(?:s)?)# unit word
+    (?:\s+of\s+(?:u\.?s\.?\s*)?dollar(?:s)?)?     # optional: "of U.S. Dollars"
+    (?:[^)]*)                                     # any run until a ')'
+    (?:\)|$)                                      # closing or end
+    """,
+    re.I | re.X,
+)
+
 def detect_unit_multiplier(context_text: str) -> float:
-    t = _lower(context_text)
-    if "in thousands" in t or "(thousands)" in t:
-        return 1_000.0
-    if "in millions" in t or "(millions)" in t:
-        return 1_000_000.0
-    if "in billions" in t or "(billions)" in t:
-        return 1_000_000_000.0
-    m = re.search(r"\(.*in\s+(thousands|millions|billions).*?\)", t)
+    t = _lower(context_text).replace("\u00a0", " ").replace("\u2009", " ").replace("\u202f", " ")
+    # Fast path checks
+    if "in thousands" in t or "(thousands)" in t: return 1_000.0
+    if "in millions" in t or "(millions)" in t:   return 1_000_000.0
+    if "in billions" in t or "(billions)" in t:   return 1_000_000_000.0
+
+    m = _UNIT_RX.search(t)
     if m:
-        return {"thousands": 1_000.0, "millions": 1_000_000.0, "billions": 1_000_000_000.0}[m.group(1)]
+        s = m.group(0)
+        if "thousand" in s: return 1_000.0
+        if "million"  in s: return 1_000_000.0
+        if "billion"  in s: return 1_000_000_000.0
+
     return 1.0
+
 
 # =========================
 # Balance sheet detection & extraction
@@ -386,8 +450,10 @@ def looks_like_balance_sheet(rows: List[List[str]], heading_text: str) -> Tuple[
 
     return False, {"why": "no"}
 
-def extract_cash_like_values(rows: List[List[str]], heading: str) -> Dict[str, Any]:
+def extract_cash_like_values(rows: List[List[str]], heading: str, table_el: etree._Element = None) -> Dict[str, Any]:
     header_blob = heading + " " + " ".join(" ".join(r) for r in rows[:3])
+    if table_el is not None:
+        header_blob = unit_context_around_table(table_el) + " " + header_blob
     mult = detect_unit_multiplier(header_blob)
 
     col = pick_value_column(rows, prefer="latest")
@@ -589,7 +655,7 @@ def scan_doc_for_balance_sheet_and_extract(
                     num_cols += 1
             score += min(1.2, 0.45 * max(0, num_cols - 1))
 
-            vals = extract_cash_like_values(rows, heading)
+            vals = extract_cash_like_values(rows, heading, t)
             got_any = any(
                 vals.get(k) is not None
                 for k in (

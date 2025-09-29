@@ -73,7 +73,7 @@ def t_sec_btc() -> pd.DataFrame:
 # ---------------- Coinbase prices task ----------------
 @task(retries=2, retry_delay_seconds=60)
 def t_coinbase_prices() -> pd.DataFrame:
-    df = get_last_n_days_excluding_today(n=3)  # 3 fully closed days, excludes today
+    df = get_last_n_days_excluding_today(n=7)  # 3 fully closed days, excludes today
     cols = ["date","product_id","open","high","low","close","volume"]
     return df.reindex(columns=cols)
 

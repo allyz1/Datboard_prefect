@@ -3,28 +3,38 @@ from datetime import date
 from typing import Dict, Any, List
 import numpy as np
 import pandas as pd
-from supabase import create_client  # you already use this in your helper
+from supabase import create_client
+
+EXPECTED = ["date", "product_id", "open", "close"]
 
 def df_to_records_clean(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    if df is None or df.empty:
+        return []
+
+    # ensure required columns exist
+    for c in EXPECTED:
+        if c not in df.columns:
+            df[c] = None
+
     # keep only expected cols and order
-    cols = ["date", "product_id", "open", "high", "low", "close", "volume"]
-    df = df.loc[:, cols].copy()
+    df = df.loc[:, EXPECTED].copy()
 
-    # coerce numerics; remove inf/nan rows
-    num = ["open","high","low","close","volume"]
-    df[num] = df[num].apply(pd.to_numeric, errors="coerce")
+    # coerce numerics; drop rows missing open/close
+    df[["open","close"]] = df[["open","close"]].apply(pd.to_numeric, errors="coerce")
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    df.dropna(subset=num, inplace=True)
+    df.dropna(subset=["open","close"], inplace=True)
 
-    # key & canonical types
+    # normalize types
     df["date"] = pd.to_datetime(df["date"]).dt.date
     df["product_id"] = df["product_id"].astype(str)
+
+    # stable key (unique per day+product)
     df["key"] = df["date"].astype(str) + "-" + df["product_id"]
 
-    # convert any remaining NaN to None
+    # convert NaN -> None for PostgREST
     df = df.where(df.notnull(), None)
 
-    # convert to plain python (no numpy scalars)
+    # convert to plain python scalars
     records: List[Dict[str, Any]] = []
     for row in df.to_dict(orient="records"):
         rec: Dict[str, Any] = {}
@@ -34,22 +44,19 @@ def df_to_records_clean(df: pd.DataFrame) -> List[Dict[str, Any]]:
             if isinstance(v, pd.Timestamp):
                 v = v.date().isoformat()
             if isinstance(v, date):
-                v = v.isoformat()  # 'YYYY-MM-DD' for PostgREST date
+                v = v.isoformat()
             rec[k] = v
         records.append(rec)
 
-    # belt & suspenders: remove any keys whose value is not JSON-safe
-    def is_bad(x):
-        return isinstance(x, float) and (x != x or x in (float("inf"), float("-inf")))
+    # final guard against non-finite floats
+    def bad(x): return isinstance(x, float) and (np.isnan(x) or np.isinf(x))
+    cleaned = []
     for r in records:
-        for k, v in list(r.items()):
-            if is_bad(v):
-                # drop the whole record rather than send a bad value
-                r["__DROP__"] = True
-                break
-    records = [r for r in records if not r.get("__DROP__")]
+        if bad(r.get("open")) or bad(r.get("close")):
+            continue
+        cleaned.append(r)
 
-    return records
+    return cleaned
 
 def upload_coinbase_df(supabase_url: str, supabase_key: str, df: pd.DataFrame):
     if df is None or df.empty:
@@ -61,5 +68,4 @@ def upload_coinbase_df(supabase_url: str, supabase_key: str, df: pd.DataFrame):
 
     client = create_client(supabase_url, supabase_key)
     res = client.table("coinbase").upsert(records, on_conflict="key").execute()
-    # You can inspect res.data / res.count depending on your client version
     return {"attempted": len(records), "sent": len(records), "skipped_existing": 0}

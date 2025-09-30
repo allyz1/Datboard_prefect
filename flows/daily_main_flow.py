@@ -41,6 +41,12 @@ from app.sec_deals.drivers import run_outstanding as OUT
 # Supabase append-only insert
 from app.clients.supabase_append import insert_outstanding_raw_df
 
+# Pipes extractor
+from app.sec_deals.drivers import run_pipes as PIPES
+
+# Supabase append-only insert
+from app.clients.supabase_append import insert_pipes_raw_df
+
 # === NEW: SEC cash daily + Noncrypto upload ===
 from app.sec.cash_daily import (
     collect_recent_accessions,
@@ -248,6 +254,42 @@ def t_upload_outstanding(df: pd.DataFrame) -> dict:
         return {"attempted": 0, "sent": 0}
     return insert_outstanding_raw_df("Outstanding_shares_raw", df, chunk_size=500)
 
+@task(retries=2, retry_delay_seconds=60)
+def t_pipes_df(tickers: list[str], since_hours: int = 24) -> pd.DataFrame:
+    """
+    Build PIPE rows for the last N hours (8-K / S-1 / S-3 / 424B3 / 424B7).
+    """
+    if not tickers:
+        return pd.DataFrame()
+
+    params = dict(
+        year=2025,
+        year_by="accession",
+        limit=600,
+        max_docs=6,
+        max_snips=4,
+        since_hours=since_hours,
+        use_acceptance=True,
+    )
+
+    frames: list[pd.DataFrame] = []
+    uniq = sorted({str(t).strip().upper() for t in tickers if str(t).strip()})
+    for tk in uniq:
+        df_t = PIPES.build_for_ticker(tk, **params)
+        if isinstance(df_t, pd.DataFrame) and not df_t.empty:
+            frames.append(df_t)
+
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+@task(retries=2, retry_delay_seconds=60)
+def t_upload_pipes(df: pd.DataFrame) -> dict:
+    """
+    Append PIPE rows to Pipes_raw (no upsert).
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+    return insert_pipes_raw_df("Pipes_raw", df, chunk_size=500)
 
 
 # ---------------- NEW: SEC cash → Noncrypto_holdings_raw ----------------
@@ -361,6 +403,7 @@ def daily_main_pipeline(
     reg_direct_hours: int = 24,
     reg_direct_do_upsert: bool = True,
     outstanding_hours: int = 24,
+    pipes_hours: int = 24,
 ):
     logger = get_run_logger()
     tickers = tickers or DEFAULT_TICKERS
@@ -452,6 +495,15 @@ def daily_main_pipeline(
         logger.info("[Outstanding_shares_raw] No outstanding-share rows in requested window.")
         out_stats = {"attempted": 0, "sent": 0}
 
+    # PIPEs → Pipes_raw
+    pipes_df = t_pipes_df.submit(tickers, since_hours=pipes_hours).result()
+    if pipes_df is not None and not pipes_df.empty:
+        pipes_stats = t_upload_pipes.submit(pipes_df).result()
+        logger.info(f"[Pipes_raw] attempted={pipes_stats.get('attempted', 0)} sent={pipes_stats.get('sent', 0)}")
+    else:
+        logger.info("[Pipes_raw] No PIPE rows in requested window.")
+        pipes_stats = {"attempted": 0, "sent": 0}
+
     return {
         "holdings": stats_holdings,
         "coinbase": stats_cb,
@@ -460,6 +512,7 @@ def daily_main_pipeline(
         "noncrypto_holdings": noncrypto_stats,
         "reg_direct_raw": rd_stats,
         "outstanding_shares_raw": out_stats,
+        "pipes_raw": pipes_stats,
     }
 
 if __name__ == "__main__":

@@ -696,3 +696,100 @@ def insert_outstanding_raw_df(
         sent += len(batch)
 
     return {"attempted": len(df2), "sent": sent}
+
+# ===== Pipes_raw upload helpers =====
+PIPES_TABLE = "Pipes_raw"
+
+PIPES_RAW_COLS = [
+    "ticker","filingDate","form","accessionNumber","event_type_final",
+    "price_per_share_text","price_per_share_usd",
+    "shares_issued_text","shares_issued",
+    "gross_proceeds_text","gross_proceeds_usd",
+    "warrant_coverage_text","warrant_coverage_pct",
+    "exercise_price_text","exercise_price_usd",
+    "convert_price_text","convert_price_usd",
+    "ownership_blocker_text","ownership_blocker_pct",
+    "reg_file_deadline_text","reg_file_deadline_days",
+    "reg_effect_deadline_text","reg_effect_deadline_days",
+    "closing_date_text","security_types_text",
+    "source_url","exhibit_hint","snippet","score",
+]
+
+def prep_pipes_raw_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize PIPE rows for insertion into Pipes_raw.
+    Append-only: assumes table has an identity PK; we do NOT send 'key'.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=PIPES_RAW_COLS)
+
+    out = df.copy()
+
+    # Ensure expected columns exist
+    for c in PIPES_RAW_COLS:
+        if c not in out.columns:
+            out[c] = pd.NA
+    out = out[PIPES_RAW_COLS]
+
+    # Types / casing
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    out["form"] = out["form"].astype(str).str.upper()
+    out["accessionNumber"] = out["accessionNumber"].astype("string")
+    out["event_type_final"] = out["event_type_final"].astype("string")
+    out["exhibit_hint"] = out["exhibit_hint"].astype("string")
+    out["security_types_text"] = out["security_types_text"].astype("string")
+    out["closing_date_text"] = out["closing_date_text"].astype("string")
+
+    # Dates -> ISO date (string)
+    out["filingDate"] = pd.to_datetime(out["filingDate"], errors="coerce").dt.date.astype("string")
+
+    # Numerics
+    for c in (
+        "price_per_share_usd","gross_proceeds_usd","shares_issued",
+        "warrant_coverage_pct","exercise_price_usd","convert_price_usd",
+        "ownership_blocker_pct","reg_file_deadline_days","reg_effect_deadline_days","score",
+    ):
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    # Text-like fields
+    for c in (
+        "price_per_share_text","gross_proceeds_text","shares_issued_text",
+        "warrant_coverage_text","exercise_price_text","convert_price_text",
+        "ownership_blocker_text","reg_file_deadline_text","reg_effect_deadline_text",
+        "source_url","snippet",
+    ):
+        out[c] = out[c].astype("string")
+
+    # Drop rows missing critical identifiers
+    out = out.dropna(subset=["ticker","accessionNumber","source_url"], how="any")
+
+    # Light de-dupe across exact triples (optional; keeps latest)
+    out = out.drop_duplicates(subset=["accessionNumber","source_url","event_type_final"], keep="last").reset_index(drop=True)
+    return out
+
+
+def insert_pipes_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Append-only insert into Pipes_raw.
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+
+    sb = get_supabase()
+    df2 = prep_pipes_raw_df(df)
+    if df2.empty:
+        return {"attempted": 0, "sent": 0}
+
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
+
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i + chunk_size]
+        sb.table(table).insert(batch).execute()
+        sent += len(batch)
+
+    return {"attempted": len(df2), "sent": sent}

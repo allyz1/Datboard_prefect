@@ -197,27 +197,14 @@ def t_reg_direct_df(tickers: list[str], since_hours: int = 24) -> pd.DataFrame:
 
 
 @task(retries=2, retry_delay_seconds=60)
-def t_upload_reg_direct(df: pd.DataFrame, upsert: bool = True) -> dict:
+def t_upload_reg_direct(df: pd.DataFrame) -> dict:
     """
-    Upload Registered Direct rows to Reg_direct_raw.
-    Uses composite uniqueness (accessionNumber, source_url, event_type_final) for idempotency.
+    Append Registered Direct rows to Reg_direct_raw.
+    No upsert/unique constraint; relies on auto-increment PK.
     """
     if df is None or df.empty:
         return {"attempted": 0, "sent": 0}
-
-    # optional: normalize first
-    # df = prep_reg_direct_raw_df(df)
-
-    if upsert:
-        return upsert_reg_direct_raw_df(
-            table="Reg_direct_raw",
-            df=df,
-            on_conflict="accessionNumber,source_url,event_type_final",  # or the index name, e.g. "uniq_reg_direct_raw"
-            do_update=False,
-            chunk_size=500,
-        )
-    else:
-        return insert_reg_direct_raw_df("Reg_direct_raw", df, chunk_size=500)
+    return insert_reg_direct_raw_df("Reg_direct_raw", df, chunk_size=500)
 
 
 # ---------------- NEW: SEC cash → Noncrypto_holdings_raw ----------------
@@ -406,11 +393,12 @@ def daily_main_pipeline(
     # 6) Registered Directs → Reg_direct_raw  (same tickers)
     rd_df = t_reg_direct_df.submit(tickers, since_hours=reg_direct_hours).result()
     if rd_df is not None and not rd_df.empty:
-        rd_stats = t_upload_reg_direct.submit(rd_df, upsert=reg_direct_do_upsert).result()
+        rd_stats = t_upload_reg_direct.submit(rd_df).result()
         logger.info(f"[Reg_direct_raw] attempted={rd_stats.get('attempted', 0)} sent={rd_stats.get('sent', 0)}")
     else:
         logger.info("[Reg_direct_raw] No Registered Direct rows in requested window.")
         rd_stats = {"attempted": 0, "sent": 0}
+
 
 
     return {

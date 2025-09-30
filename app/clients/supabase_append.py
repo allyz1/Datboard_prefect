@@ -428,3 +428,188 @@ def upload_noncrypto_from_cash(
         do_update=do_update,
         precheck=precheck,
     )
+    
+# ===== Reg_direct_raw upload helpers (ADD THIS SECTION) =====
+REG_DIRECT_TABLE = "Reg_direct_raw"
+
+REG_DIRECT_RAW_COLS = [
+    "ticker","filingDate","form","accessionNumber","event_type_final",
+    "price_per_share_text","price_per_share_usd",
+    "shares_issued_text","shares_issued",
+    "gross_proceeds_text","gross_proceeds_usd",
+    "warrant_coverage_text","warrant_coverage_pct",
+    "exercise_price_text","exercise_price_usd",
+    "convert_price_text","convert_price_usd",
+    "ownership_blocker_text","security_types_text",
+    "source_url","exhibit_hint","snippet","score",
+]
+
+def prep_reg_direct_raw_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize Registered Direct rows for insertion into Reg_direct_raw.
+    Does NOT send a 'key' column (assume DB generates PK / has unique constraint).
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=REG_DIRECT_RAW_COLS)
+
+    out = df.copy()
+
+    # Ensure schema columns exist
+    for c in REG_DIRECT_RAW_COLS:
+        if c not in out.columns:
+            out[c] = pd.NA
+    out = out[REG_DIRECT_RAW_COLS]
+
+    # Basic types / casing
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    out["form"] = out["form"].astype(str).str.upper()
+    out["accessionNumber"] = out["accessionNumber"].astype("string")
+    out["event_type_final"] = out["event_type_final"].astype("string")
+    out["exhibit_hint"] = out["exhibit_hint"].astype("string")
+
+    # Dates to ISO date strings
+    out["filingDate"] = pd.to_datetime(out["filingDate"], errors="coerce").dt.date.astype("string")
+
+    # Numeric coercions
+    for c in (
+        "price_per_share_usd","gross_proceeds_usd","shares_issued",
+        "warrant_coverage_pct","exercise_price_usd","convert_price_usd","score",
+    ):
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    # Text-like fields
+    for c in (
+        "price_per_share_text","gross_proceeds_text","shares_issued_text",
+        "warrant_coverage_text","exercise_price_text","convert_price_text",
+        "ownership_blocker_text","security_types_text","source_url","snippet",
+    ):
+        out[c] = out[c].astype("string")
+
+    # Drop rows missing critical identifiers
+    out = out.dropna(subset=["ticker", "accessionNumber", "source_url"], how="any")
+
+    # De-dupe conservative: (accessionNumber, source_url, event_type_final)
+    out = out.drop_duplicates(subset=["accessionNumber","source_url","event_type_final"], keep="last").reset_index(drop=True)
+    return out
+
+
+def insert_reg_direct_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Append-only insert into Reg_direct_raw (no upsert).
+    Use when the table's PK/unique constraint is DB-managed and duplicates are impossible/unlikely.
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+
+    sb = get_supabase()
+    df2 = prep_reg_direct_raw_df(df)
+    if df2.empty:
+        return {"attempted": 0, "sent": 0}
+
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
+
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i + chunk_size]
+        sb.table(table).insert(batch).execute()
+        sent += len(batch)
+
+    return {"attempted": len(df2), "sent": sent}
+
+
+def upsert_reg_direct_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    on_conflict: str = "accessionNumber,source_url,event_type_final",
+    do_update: bool = False,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Idempotent upload into Reg_direct_raw using PostgREST upsert.
+    Provide a UNIQUE constraint backing `on_conflict`, e.g.:
+
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_reg_direct_raw
+      ON public."Reg_direct_raw"(accessionNumber, source_url, event_type_final);
+
+    Then call with on_conflict="accessionNumber,source_url,event_type_final" or the index name.
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+
+    sb = get_supabase()
+    df2 = prep_reg_direct_raw_df(df)
+    if df2.empty:
+        return {"attempted": 0, "sent": 0}
+
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
+
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i + chunk_size]
+        sb.table(table).upsert(
+            batch,
+            on_conflict=on_conflict,
+            ignore_duplicates=(not do_update),
+            returning="minimal",
+        ).execute()
+        sent += len(batch)
+
+    return {"attempted": len(df2), "sent": sent}
+
+
+def run_reg_direct_daily_and_upload(
+    tickers: List[str],
+    *,
+    table: str = REG_DIRECT_TABLE,
+    since_hours: int = 24,
+    use_acceptance: bool = True,
+    limit: int = 600,
+    max_docs: int = 6,
+    max_snips: int = 4,
+    upsert: bool = True,
+    on_conflict: str = "accessionNumber,source_url,event_type_final",
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    End-to-end: run the Registered Direct extractor (past N hours) and upload to Supabase.
+
+    Returns a dict with counts, e.g. {"attempted": X, "sent": Y} for insert,
+    or {"attempted": X, "sent": Y} for upsert (Y == rows sent to API).
+    """
+    if not tickers:
+        return {"attempted": 0, "sent": 0}
+
+    # Lazy import to avoid heavy deps at module import time
+    try:
+        from app.sec_deals.drivers.run_reg_direct import build_for_tickers
+    except Exception:
+        from sec_deals.drivers.run_reg_direct import build_for_tickers  # fallback if installed as top-level
+
+    df = build_for_tickers(
+        tickers,
+        year_by="accession",
+        limit=limit,
+        max_docs=max_docs,
+        max_snips=max_snips,
+        since_hours=since_hours,
+        use_acceptance=use_acceptance,
+    )
+
+    if upsert:
+        return upsert_reg_direct_raw_df(
+            table=table,
+            df=df,
+            on_conflict=on_conflict,
+            do_update=False,
+            chunk_size=chunk_size,
+        )
+    else:
+        return insert_reg_direct_raw_df(
+            table=table,
+            df=df,
+            chunk_size=chunk_size,
+        )

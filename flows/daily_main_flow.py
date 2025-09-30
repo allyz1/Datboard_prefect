@@ -25,6 +25,10 @@ from app.pipelines.BTC_SEC_holdings_main import get_sec_btc_holdings_df
 from app.sec.ATM_daily import collect_timelines
 from app.clients.supabase_append import insert_atm_raw_df, upsert_atm_raw_df
 
+# Reg Directs (SEC) → Reg_direct_raw
+from app.clients.supabase_append import run_reg_direct_daily_and_upload
+
+
 # === NEW: SEC cash daily + Noncrypto upload ===
 from app.sec.cash_daily import (
     collect_recent_accessions,
@@ -146,6 +150,26 @@ def t_upload_atm(df: pd.DataFrame, upsert: bool = False) -> dict:
         return upsert_atm_raw_df("ATM_raw", df, on_conflict="uniq_atm_raw", do_update=False)
     else:
         return insert_atm_raw_df("ATM_raw", df)
+
+@task(retries=2, retry_delay_seconds=60)
+def t_reg_direct_upload(tickers: list[str], hours: int = 24, upsert: bool = True) -> dict:
+    """
+    Run the Registered Direct extractor (past `hours`) and upload to Reg_direct_raw.
+    Uses a UNIQUE index on (accessionNumber, source_url, event_type_final) for idempotent upserts.
+    """
+    return run_reg_direct_daily_and_upload(
+        tickers=tickers,
+        table="Reg_direct_raw",
+        since_hours=hours,
+        use_acceptance=True,
+        limit=600,
+        max_docs=6,
+        max_snips=4,
+        upsert=upsert,
+        on_conflict="accessionNumber,source_url,event_type_final",  # or your index name e.g. "uniq_reg_direct_raw"
+        chunk_size=500,
+    )
+
 # ---------------- NEW: SEC cash → Noncrypto_holdings_raw ----------------
 def _cash_recent_for_ticker(
     ticker: str,
@@ -254,6 +278,8 @@ def daily_main_pipeline(
     atm_hours: int = 24,
     atm_do_upsert: bool = False,
     sec_cash_hours: int = 24,
+    reg_direct_hours: int = 24,
+    reg_direct_do_upsert: bool = True,
 ):
     logger = get_run_logger()
     tickers = tickers or DEFAULT_TICKERS
@@ -326,6 +352,19 @@ def daily_main_pipeline(
         prefer_combined_if_missing=False,
         do_update=False,
     ).result()
+    
+    # 6) Registered Directs → Reg_direct_raw  (same tickers)
+    rd_stats = t_reg_direct_upload.submit(
+        tickers=tickers,
+        hours=reg_direct_hours,
+        upsert=reg_direct_do_upsert,
+    ).result()
+    
+    if rd_stats and rd_stats.get("attempted", 0) > 0:
+        logger.info(f"[Reg_direct_raw] attempted={rd_stats.get('attempted')} sent={rd_stats.get('sent')}")
+    else:
+        logger.info("[Reg_direct_raw] No Registered Direct rows in requested window.")
+
 
     return {
         "holdings": stats_holdings,
@@ -333,6 +372,7 @@ def daily_main_pipeline(
         "polygon": polygon_stats,
         "atm_raw": atm_stats,
         "noncrypto_holdings": noncrypto_stats,
+        "reg_direct_raw": rd_stats,
     }
 
 if __name__ == "__main__":

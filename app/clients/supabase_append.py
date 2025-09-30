@@ -613,3 +613,86 @@ def run_reg_direct_daily_and_upload(
             df=df,
             chunk_size=chunk_size,
         )
+# ===== Outstanding_shares_raw upload helpers =====
+OUTSTANDING_TABLE = "Outstanding_shares_raw"
+
+OUTSTANDING_RAW_COLS = [
+    "ticker","filingDate","form","accessionNumber","event_type_final",
+    "outstanding_shares_text","outstanding_shares",
+    "as_of_date_text","as_of_date_iso",
+    "report_date_text","report_date_iso",
+    "source_url","exhibit_hint","snippet","score",
+]
+
+def prep_outstanding_raw_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize Outstanding Shares rows for insertion into Outstanding_shares_raw.
+    Append-only: assumes table has an identity PK; we do NOT send 'key'.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=OUTSTANDING_RAW_COLS)
+
+    out = df.copy()
+
+    # Ensure expected columns exist
+    for c in OUTSTANDING_RAW_COLS:
+        if c not in out.columns:
+            out[c] = pd.NA
+    out = out[OUTSTANDING_RAW_COLS]
+
+    # Types / casing
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    out["form"] = out["form"].astype(str).str.upper()
+    out["accessionNumber"] = out["accessionNumber"].astype("string")
+    out["event_type_final"] = out["event_type_final"].astype("string")
+    out["exhibit_hint"] = out["exhibit_hint"].astype("string")
+
+    # Dates -> ISO date (string)
+    out["filingDate"] = pd.to_datetime(out["filingDate"], errors="coerce").dt.date.astype("string")
+    out["as_of_date_iso"] = pd.to_datetime(out["as_of_date_iso"], errors="coerce").dt.date.astype("string")
+    out["report_date_iso"] = pd.to_datetime(out["report_date_iso"], errors="coerce").dt.date.astype("string")
+
+    # Numerics
+    out["outstanding_shares"] = pd.to_numeric(out["outstanding_shares"], errors="coerce")
+    out["score"] = pd.to_numeric(out["score"], errors="coerce")
+
+    # Text-like fields
+    for c in (
+        "outstanding_shares_text","as_of_date_text",
+        "report_date_text","source_url","snippet"
+    ):
+        out[c] = out[c].astype("string")
+
+    # Drop rows missing critical identifiers
+    out = out.dropna(subset=["ticker","accessionNumber","source_url"], how="any")
+
+    # Light de-dupe across exact triples (optional; keeps latest)
+    out = out.drop_duplicates(subset=["accessionNumber","source_url","event_type_final"], keep="last").reset_index(drop=True)
+    return out
+
+
+def insert_outstanding_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Append-only insert into Outstanding_shares_raw.
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+
+    sb = get_supabase()
+    df2 = prep_outstanding_raw_df(df)
+    if df2.empty:
+        return {"attempted": 0, "sent": 0}
+
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
+
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i + chunk_size]
+        sb.table(table).insert(batch).execute()
+        sent += len(batch)
+
+    return {"attempted": len(df2), "sent": sent}

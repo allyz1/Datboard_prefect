@@ -35,7 +35,11 @@ from app.clients.supabase_append import (
     insert_reg_direct_raw_df,
 )
 
+# Outstanding shares extractor
+from app.sec_deals.drivers import run_outstanding as OUT
 
+# Supabase append-only insert
+from app.clients.supabase_append import insert_outstanding_raw_df
 
 # === NEW: SEC cash daily + Noncrypto upload ===
 from app.sec.cash_daily import (
@@ -206,6 +210,45 @@ def t_upload_reg_direct(df: pd.DataFrame) -> dict:
         return {"attempted": 0, "sent": 0}
     return insert_reg_direct_raw_df("Reg_direct_raw", df, chunk_size=500)
 
+@task(retries=2, retry_delay_seconds=60)
+def t_outstanding_df(tickers: list[str], since_hours: int = 24) -> pd.DataFrame:
+    """
+    Build Outstanding Shares rows for the last N hours.
+    Uses OUT.build_for_ticker per symbol.
+    """
+    if not tickers:
+        return pd.DataFrame()
+
+    params = dict(
+        year=2025,
+        year_by="filingdate",     # your script default; acceptance window is controlled by since_hours/use_acceptance
+        limit=400,
+        max_docs=4,
+        max_snips=2,
+        since_hours=since_hours,
+        use_acceptance=True,
+    )
+
+    frames: list[pd.DataFrame] = []
+    uniq = sorted({str(t).strip().upper() for t in tickers if str(t).strip()})
+    for tk in uniq:
+        df_t = OUT.build_for_ticker(tk, **params)
+        if isinstance(df_t, pd.DataFrame) and not df_t.empty:
+            frames.append(df_t)
+
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+@task(retries=2, retry_delay_seconds=60)
+def t_upload_outstanding(df: pd.DataFrame) -> dict:
+    """
+    Append Outstanding Shares rows to Outstanding_shares_raw (no upsert).
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+    return insert_outstanding_raw_df("Outstanding_shares_raw", df, chunk_size=500)
+
+
 
 # ---------------- NEW: SEC cash → Noncrypto_holdings_raw ----------------
 def _cash_recent_for_ticker(
@@ -317,6 +360,7 @@ def daily_main_pipeline(
     sec_cash_hours: int = 24,
     reg_direct_hours: int = 24,
     reg_direct_do_upsert: bool = True,
+    outstanding_hours: int = 24,
 ):
     logger = get_run_logger()
     tickers = tickers or DEFAULT_TICKERS
@@ -399,7 +443,14 @@ def daily_main_pipeline(
         logger.info("[Reg_direct_raw] No Registered Direct rows in requested window.")
         rd_stats = {"attempted": 0, "sent": 0}
 
-
+    # Outstanding Shares → Outstanding_shares_raw
+    out_df = t_outstanding_df.submit(tickers, since_hours=outstanding_hours).result()
+    if out_df is not None and not out_df.empty:
+        out_stats = t_upload_outstanding.submit(out_df).result()
+        logger.info(f"[Outstanding_shares_raw] attempted={out_stats.get('attempted', 0)} sent={out_stats.get('sent', 0)}")
+    else:
+        logger.info("[Outstanding_shares_raw] No outstanding-share rows in requested window.")
+        out_stats = {"attempted": 0, "sent": 0}
 
     return {
         "holdings": stats_holdings,
@@ -408,6 +459,7 @@ def daily_main_pipeline(
         "atm_raw": atm_stats,
         "noncrypto_holdings": noncrypto_stats,
         "reg_direct_raw": rd_stats,
+        "outstanding_shares_raw": out_stats,
     }
 
 if __name__ == "__main__":

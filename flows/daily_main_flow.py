@@ -25,8 +25,16 @@ from app.pipelines.BTC_SEC_holdings_main import get_sec_btc_holdings_df
 from app.sec.ATM_daily import collect_timelines
 from app.clients.supabase_append import insert_atm_raw_df, upsert_atm_raw_df
 
-# Reg Directs (SEC) → Reg_direct_raw
-from app.clients.supabase_append import run_reg_direct_daily_and_upload
+# Reg Direct extractor (builds a DataFrame)
+from app.sec_deals.drivers import run_reg_direct as RD
+
+# Reg Direct upload helpers (already in your supabase_append module)
+from app.clients.supabase_append import (
+    prep_reg_direct_raw_df,      # if you want to pre-check/normalize (optional)
+    upsert_reg_direct_raw_df,
+    insert_reg_direct_raw_df,
+)
+
 
 
 # === NEW: SEC cash daily + Noncrypto upload ===
@@ -152,23 +160,65 @@ def t_upload_atm(df: pd.DataFrame, upsert: bool = False) -> dict:
         return insert_atm_raw_df("ATM_raw", df)
 
 @task(retries=2, retry_delay_seconds=60)
-def t_reg_direct_upload(tickers: list[str], hours: int = 24, upsert: bool = True) -> dict:
+def t_reg_direct_df(tickers: list[str], since_hours: int = 24) -> pd.DataFrame:
     """
-    Run the Registered Direct extractor (past `hours`) and upload to Reg_direct_raw.
-    Uses a UNIQUE index on (accessionNumber, source_url, event_type_final) for idempotent upserts.
+    Build Registered Direct rows for the last N hours.
+    Tries RD.build_for_tickers if present; falls back to per-ticker loop.
     """
-    return run_reg_direct_daily_and_upload(
-        tickers=tickers,
-        table="Reg_direct_raw",
-        since_hours=hours,
-        use_acceptance=True,
+    if not tickers:
+        return pd.DataFrame()
+
+    params = dict(
+        year=2025,
+        year_by="accession",
         limit=600,
         max_docs=6,
         max_snips=4,
-        upsert=upsert,
-        on_conflict="accessionNumber,source_url,event_type_final",  # or your index name e.g. "uniq_reg_direct_raw"
-        chunk_size=500,
+        since_hours=since_hours,
+        use_acceptance=True,
     )
+
+    # Preferred: single call aggregator
+    if hasattr(RD, "build_for_tickers"):
+        return RD.build_for_tickers(tickers, **params)
+
+    # Fallback: loop per ticker
+    if not hasattr(RD, "build_for_ticker"):
+        raise ImportError("run_reg_direct module lacks build_for_tickers and build_for_ticker")
+
+    frames: list[pd.DataFrame] = []
+    uniq = sorted({str(t).strip().upper() for t in tickers if str(t).strip()})
+    for tk in uniq:
+        df_t = RD.build_for_ticker(tk, **params)
+        if isinstance(df_t, pd.DataFrame) and not df_t.empty:
+            frames.append(df_t)
+
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+@task(retries=2, retry_delay_seconds=60)
+def t_upload_reg_direct(df: pd.DataFrame, upsert: bool = True) -> dict:
+    """
+    Upload Registered Direct rows to Reg_direct_raw.
+    Uses composite uniqueness (accessionNumber, source_url, event_type_final) for idempotency.
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+
+    # optional: normalize first
+    # df = prep_reg_direct_raw_df(df)
+
+    if upsert:
+        return upsert_reg_direct_raw_df(
+            table="Reg_direct_raw",
+            df=df,
+            on_conflict="accessionNumber,source_url,event_type_final",  # or the index name, e.g. "uniq_reg_direct_raw"
+            do_update=False,
+            chunk_size=500,
+        )
+    else:
+        return insert_reg_direct_raw_df("Reg_direct_raw", df, chunk_size=500)
+
 
 # ---------------- NEW: SEC cash → Noncrypto_holdings_raw ----------------
 def _cash_recent_for_ticker(
@@ -354,16 +404,13 @@ def daily_main_pipeline(
     ).result()
     
     # 6) Registered Directs → Reg_direct_raw  (same tickers)
-    rd_stats = t_reg_direct_upload.submit(
-        tickers=tickers,
-        hours=reg_direct_hours,
-        upsert=reg_direct_do_upsert,
-    ).result()
-    
-    if rd_stats and rd_stats.get("attempted", 0) > 0:
-        logger.info(f"[Reg_direct_raw] attempted={rd_stats.get('attempted')} sent={rd_stats.get('sent')}")
+    rd_df = t_reg_direct_df.submit(tickers, since_hours=reg_direct_hours).result()
+    if rd_df is not None and not rd_df.empty:
+        rd_stats = t_upload_reg_direct.submit(rd_df, upsert=reg_direct_do_upsert).result()
+        logger.info(f"[Reg_direct_raw] attempted={rd_stats.get('attempted', 0)} sent={rd_stats.get('sent', 0)}")
     else:
         logger.info("[Reg_direct_raw] No Registered Direct rows in requested window.")
+        rd_stats = {"attempted": 0, "sent": 0}
 
 
     return {

@@ -8,11 +8,11 @@ import pandas as pd
 import numpy as np
 from pandas.api.types import is_number
 
-from sec_deals.core.fetch import resolve_cik, fetch_filings, list_filing_files, get
-from sec_deals.core.select import candidate_html_urls, Mode
-from sec_deals.core.extract import html_to_blocks
-from sec_deals.core.types import DealHit
-from sec_deals.modes import warrants as mode_impl
+from ..core.fetch import resolve_cik, fetch_filings, list_filing_files, get
+from ..core.select import candidate_html_urls, Mode
+from ..core.extract import html_to_blocks
+from ..core.types import DealHit
+from ..modes import warrants as mode_impl
 
 # Warrants show up in a lot of places (8-K Item 1.01/3.02, S-1/S-3, 424B5 supplements, 424B3/424B7)
 ALLOWED_FORMS = ("8-K", "S-1", "S-3", "424B5", "424B3", "424B7")

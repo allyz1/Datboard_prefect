@@ -5,8 +5,8 @@ from typing import List, Optional, Tuple
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta  # pip install python-dateutil
 
-from sec_deals.core.types import DealHit
-from sec_deals.core.parse_common import (
+from ..core.types import DealHit
+from ..core.parse_common import (
     MONEY_RX, SHARES_RX, PCT_RX, MONEY_SCALED_RX, SHARES_SCALED_RX,
     money_phrase, shares_phrase, pct_phrase,
     parse_scaled_number_from_phrase, parse_shares_from_phrase,

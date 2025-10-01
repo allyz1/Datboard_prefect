@@ -69,7 +69,7 @@ def _recent_accession_whitelist(cik: str, subset_filings: pd.DataFrame, recent_h
     Look at index.json 'last-modified' for each accession and keep those touched in the last N hours.
     Also falls back to filingDate / acceptanceDateTime if index.json has no last_modified values.
     """
-    cutoff = pd.Timestamp.utcnow() - pd.Timedelta(hours=recent_hours)
+    cutoff = pd.Timestamp.utcnow().tz_convert(None) - pd.Timedelta(hours=recent_hours)
     allow: Set[str] = set()
 
     for _, r in subset_filings.iterrows():

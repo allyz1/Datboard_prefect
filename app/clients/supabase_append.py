@@ -910,4 +910,106 @@ def insert_warrants_new_iss_raw_df(
 
     sent = 0
     for i in range(0, len(payload), chunk_size):
-        batch = payload
+        batch = payload[i:i + chunk_size]
+        sb.table(table).insert(batch).execute()
+        sent += len(batch)
+
+    return {"attempted": len(df2), "sent": sent}
+
+
+def upsert_warrants_new_iss_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    on_conflict: str = "accessionNumber,source_url,event_type_final",
+    do_update: bool = False,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Idempotent upload into Warrants_new_iss_raw using PostgREST upsert.
+
+    Recommended UNIQUE index:
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_warrants_new_iss_raw
+      ON public."Warrants_new_iss_raw"(accessionNumber, source_url, event_type_final);
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+
+    sb = get_supabase()
+    df2 = prep_warrants_new_iss_raw_df(df)
+    if df2.empty:
+        return {"attempted": 0, "sent": 0}
+
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
+
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i + chunk_size]
+        sb.table(table).upsert(
+            batch,
+            on_conflict=on_conflict,
+            ignore_duplicates=(not do_update),
+            returning="minimal",
+        ).execute()
+        sent += len(batch)
+
+    return {"attempted": len(df2), "sent": sent}
+
+
+def run_warrants_daily_and_upload(
+    tickers: List[str],
+    *,
+    table: str = WARRANTS_NEW_TABLE,
+    recent_hours: int = 24,
+    limit: int = 600,
+    max_docs: int = 6,
+    max_snips: int = 4,
+    upsert: bool = True,
+    on_conflict: str = "accessionNumber,source_url,event_type_final",
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    End-to-end: run the Warrants NEW ISSUANCE extractor (past N hours) and upload to Supabase.
+    """
+    if not tickers:
+        return {"attempted": 0, "sent": 0}
+
+    # Lazy import to avoid heavy deps at module import time
+    try:
+        from app.sec_deals.drivers.run_warrants import build_for_ticker
+    except Exception:
+        from sec_deals.drivers.run_warrants import build_for_ticker
+
+    frames: List[pd.DataFrame] = []
+    for t in sorted(set(x.strip().upper() for x in tickers if x.strip())):
+        df_t = build_for_ticker(
+            t,
+            year=pd.Timestamp.utcnow().year,   # ignored when recent_hours > 0
+            year_by="accession",
+            limit=limit,
+            max_docs=max_docs,
+            max_snips=max_snips,
+            recent_hours=recent_hours,
+        )
+        if df_t is not None and not df_t.empty:
+            frames.append(df_t)
+
+    if not frames:
+        return {"attempted": 0, "sent": 0}
+
+    df = pd.concat(frames, ignore_index=True)
+
+    if upsert:
+        return upsert_warrants_new_iss_raw_df(
+            table=table,
+            df=df,
+            on_conflict=on_conflict,
+            do_update=False,
+            chunk_size=chunk_size,
+        )
+    else:
+        return insert_warrants_new_iss_raw_df(
+            table=table,
+            df=df,
+            chunk_size=chunk_size,
+        )
+

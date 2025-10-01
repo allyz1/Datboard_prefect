@@ -54,6 +54,10 @@ from app.sec.cash_daily import (
 )
 from app.clients.supabase_append import upload_noncrypto_from_cash
 
+# Warrants NEW ISS → Supabase helper
+from app.clients.supabase_append import run_warrants_daily_and_upload
+
+
 DEFAULT_TABLE = "Holdings_raw"
 DEFAULT_TICKERS = ["MSTR","CEP","SMLR","NAKA","BMNR","SBET","ETHZ","BTCS","SQNS","BTBT","DFDV","UPXI"]
 
@@ -291,6 +295,31 @@ def t_upload_pipes(df: pd.DataFrame) -> dict:
         return {"attempted": 0, "sent": 0}
     return insert_pipes_raw_df("Pipes_raw", df, chunk_size=500)
 
+@task(retries=2, retry_delay_seconds=60)
+def t_upload_warrants_new(
+    tickers: list[str],
+    recent_hours: int = 24,
+    table: str = "Warrants_new_iss_raw",
+) -> dict:
+    """
+    End-to-end: run the Warrants NEW ISSUANCE extractor for the last N hours
+    and upsert rows into Warrants_new_iss_raw (idempotent).
+    """
+    if not tickers:
+        return {"attempted": 0, "sent": 0}
+
+    return run_warrants_daily_and_upload(
+        tickers=tickers,
+        table=table,
+        recent_hours=recent_hours,
+        limit=600,
+        max_docs=6,
+        max_snips=4,
+        upsert=True,  # uses (accessionNumber, source_url, event_type_final) unique index
+        on_conflict="accessionNumber,source_url,event_type_final",
+        chunk_size=500,
+    )
+
 
 # ---------------- NEW: SEC cash → Noncrypto_holdings_raw ----------------
 def _cash_recent_for_ticker(
@@ -404,6 +433,7 @@ def daily_main_pipeline(
     reg_direct_do_upsert: bool = True,
     outstanding_hours: int = 24,
     pipes_hours: int = 24,
+    warrants_hours: int = 24,
 ):
     logger = get_run_logger()
     tickers = tickers or DEFAULT_TICKERS
@@ -504,6 +534,14 @@ def daily_main_pipeline(
         logger.info("[Pipes_raw] No PIPE rows in requested window.")
         pipes_stats = {"attempted": 0, "sent": 0}
 
+    # Warrants NEW ISS → Warrants_new_iss_raw
+    warr_stats = t_upload_warrants_new.submit(
+        tickers=tickers,
+        recent_hours=warrants_hours,
+        table="Warrants_new_iss_raw",
+    ).result()
+    logger.info(f"[Warrants_new_iss_raw] attempted={warr_stats.get('attempted', 0)} sent={warr_stats.get('sent', 0)}")
+
     return {
         "holdings": stats_holdings,
         "coinbase": stats_cb,
@@ -513,6 +551,7 @@ def daily_main_pipeline(
         "reg_direct_raw": rd_stats,
         "outstanding_shares_raw": out_stats,
         "pipes_raw": pipes_stats,
+        "warrants_new_iss_raw": warr_stats,
     }
 
 if __name__ == "__main__":

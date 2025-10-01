@@ -793,3 +793,121 @@ def insert_pipes_raw_df(
         sent += len(batch)
 
     return {"attempted": len(df2), "sent": sent}
+
+
+# ===== Warrants_new_iss_raw upload helpers =====
+WARRANTS_NEW_TABLE = "Warrants_new_iss_raw"
+
+WARRANTS_NEW_COLS = [
+    "ticker","filingDate","form","accessionNumber","event_type_final",
+    # exercise
+    "exercise_price_text","exercise_price_text_formula","exercise_price_usd",
+    # shares (legacy + explicit buckets)
+    "shares_issued_text","shares_issued",
+    "warrant_shares_prefunded_text","warrant_shares_prefunded",
+    "warrant_shares_outstanding_text","warrant_shares_outstanding",
+    # typing / flags
+    "warrant_type","warrant_prefunded_flag","warrant_standard_flag",
+    # instruments (count of warrants issued)
+    "warrant_instruments_text","warrant_instruments",
+    # coverage / blockers
+    "warrant_coverage_text","warrant_coverage_pct",
+    "ownership_blocker_text","ownership_blocker_pct",
+    # term / dates
+    "expiration_date_text","expiration_date_iso","warrant_term_years","issuance_date_text",
+    # money / security types / roles
+    "gross_proceeds_text","security_types_text",
+    "h_warrant_role","agent_fee_text","agent_fee_pct",
+    # provenance
+    "source_url","exhibit_hint","snippet","score",
+]
+
+def prep_warrants_new_iss_raw_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize warrant NEW ISSUANCE rows for insertion into Warrants_new_iss_raw.
+    Append-only or upsert depending on caller. No 'key' column is sent.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=WARRANTS_NEW_COLS)
+
+    out = df.copy()
+
+    # Ensure schema columns exist
+    for c in WARRANTS_NEW_COLS:
+        if c not in out.columns:
+            out[c] = pd.NA
+    out = out[WARRANTS_NEW_COLS]
+
+    # Basic types / casing
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    out["form"] = out["form"].astype(str).str.upper()
+    out["accessionNumber"] = out["accessionNumber"].astype("string")
+    out["event_type_final"] = out["event_type_final"].astype("string")
+    out["exhibit_hint"] = out["exhibit_hint"].astype("string")
+    out["h_warrant_role"] = out["h_warrant_role"].astype("string")
+    out["security_types_text"] = out["security_types_text"].astype("string")
+
+    # Dates -> ISO date (string)
+    out["filingDate"] = pd.to_datetime(out["filingDate"], errors="coerce").dt.date.astype("string")
+    out["expiration_date_iso"] = pd.to_datetime(out["expiration_date_iso"], errors="coerce").dt.date.astype("string")
+    out["issuance_date_text"] = out["issuance_date_text"].astype("string")
+
+    # Numerics
+    num_cols = [
+        "exercise_price_usd","shares_issued",
+        "warrant_shares_prefunded","warrant_shares_outstanding",
+        "warrant_instruments","warrant_coverage_pct","ownership_blocker_pct",
+        "warrant_term_years","agent_fee_pct","score",
+    ]
+    for c in num_cols:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    # Text-like fields
+    text_cols = [
+        "exercise_price_text","exercise_price_text_formula",
+        "shares_issued_text",
+        "warrant_shares_prefunded_text","warrant_shares_outstanding_text",
+        "warrant_type","warrant_instruments_text",
+        "warrant_coverage_text","ownership_blocker_text",
+        "expiration_date_text","gross_proceeds_text","source_url","snippet",
+    ]
+    for c in text_cols:
+        out[c] = out[c].astype("string")
+
+    # Booleans where present
+    for c in ("warrant_prefunded_flag","warrant_standard_flag"):
+        if c in out.columns:
+            out[c] = out[c].astype("boolean")
+
+    # Drop rows missing critical identifiers
+    out = out.dropna(subset=["ticker","accessionNumber","source_url"], how="any")
+
+    # De-dupe conservatively by (accessionNumber, source_url, event_type_final)
+    out = out.drop_duplicates(
+        subset=["accessionNumber","source_url","event_type_final"], keep="last"
+    ).reset_index(drop=True)
+
+    return out
+
+
+def insert_warrants_new_iss_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Append-only insert into Warrants_new_iss_raw (no upsert).
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+
+    sb = get_supabase()
+    df2 = prep_warrants_new_iss_raw_df(df)
+    if df2.empty:
+        return {"attempted": 0, "sent": 0}
+
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
+
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload

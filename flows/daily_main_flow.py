@@ -56,6 +56,12 @@ from app.clients.supabase_append import upload_noncrypto_from_cash
 
 # Warrants NEW ISS → Supabase helper
 from app.clients.supabase_append import run_warrants_daily_and_upload
+# Outstanding warrants (row-level) builder
+from app.sec.outstanding_warrants import collect_recent_accessions as WRECENT
+from app.sec.outstanding_warrants import collect_warrant_rows_for_ticker as WROWS
+
+# Supabase uploader for Outstanding_warrants_raw
+from app.clients.supabase_append import upsert_outstanding_warrants_raw_df
 
 
 DEFAULT_TABLE = "Holdings_raw"
@@ -319,6 +325,49 @@ def t_upload_warrants_new(
         on_conflict="accessionNumber,source_url,event_type_final",
         chunk_size=500,
     )
+@task(retries=2, retry_delay_seconds=60)
+def t_warrants_outstanding_df(tickers: list[str], since_hours: int = 24) -> pd.DataFrame:
+    """
+    Build row-level Outstanding Warrants for filings touched in the last N hours.
+    """
+    frames: list[pd.DataFrame] = []
+    uniq = sorted({str(t).strip().upper() for t in (tickers or []) if str(t).strip()})
+    for tk in uniq:
+        acc_wh = WRECENT(
+            ticker=tk,
+            forms="10-K,10-Q,20-F,6-K",
+            from_date="2024-01-01",
+            limit_filings=300,
+            recent_hours=since_hours,
+            year=0,
+            year_by="accession",
+        )
+        if not acc_wh:
+            continue
+        df_t = WROWS(
+            ticker=tk,
+            forms="10-K,10-Q",
+            from_date="2024-01-01",
+            limit_filings=300,
+            max_docs_per_filing=10,
+            year=0,
+            year_by="accession",
+            accession_whitelist=acc_wh,
+        )
+        if isinstance(df_t, pd.DataFrame) and not df_t.empty:
+            frames.append(df_t)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+@task(retries=2, retry_delay_seconds=60)
+def t_upload_warrants_outstanding(df: pd.DataFrame) -> dict:
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+    return upsert_outstanding_warrants_raw_df(
+        table="Outstanding_warrants_raw",
+        df=df,
+        on_conflict="accessionNumber,source_url,row_label",
+        do_update=False,
+    )
 
 
 # ---------------- NEW: SEC cash → Noncrypto_holdings_raw ----------------
@@ -541,6 +590,15 @@ def daily_main_pipeline(
         table="Warrants_new_iss_raw",
     ).result()
     logger.info(f"[Warrants_new_iss_raw] attempted={warr_stats.get('attempted', 0)} sent={warr_stats.get('sent', 0)}")
+    # Outstanding Warrants (row-level) → Outstanding_warrants_raw
+    ow_df = t_warrants_outstanding_df.submit(tickers, since_hours=warrants_hours).result()
+    if ow_df is not None and not ow_df.empty:
+        ow_stats = t_upload_warrants_outstanding.submit(ow_df).result()
+        logger.info(f"[Outstanding_warrants_raw] attempted={ow_stats.get('attempted', 0)} sent={ow_stats.get('sent', 0)}")
+    else:
+        logger.info("[Outstanding_warrants_raw] No warrant rows in requested window.")
+        ow_stats = {"attempted": 0, "sent": 0}
+
 
     return {
         "holdings": stats_holdings,
@@ -552,6 +610,7 @@ def daily_main_pipeline(
         "outstanding_shares_raw": out_stats,
         "pipes_raw": pipes_stats,
         "warrants_new_iss_raw": warr_stats,
+        "outstanding_warrants_raw": ow_stats,
     }
 
 if __name__ == "__main__":

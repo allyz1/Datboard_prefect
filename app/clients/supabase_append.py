@@ -1013,3 +1013,95 @@ def run_warrants_daily_and_upload(
             chunk_size=chunk_size,
         )
 
+# ===== Outstanding_warrants_raw upload helpers =====
+OUT_WARRANTS_TABLE = "Outstanding_warrants_raw"
+
+OUT_WARRANTS_RAW_COLS = [
+    "ticker","filingDate","form","accessionNumber","primaryDocument",
+    "reportDate","acceptanceDateTime",
+    "source_url","table_heading","row_label","is_total_row",
+    "warrants_outstanding","exercise_price_usd",
+    "warrant_expiration_date","warrant_term_years",
+    "units_multiplier","score",
+]
+
+def prep_outstanding_warrants_raw_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=OUT_WARRANTS_RAW_COLS)
+
+    out = df.copy()
+    for c in OUT_WARRANTS_RAW_COLS:
+        if c not in out.columns:
+            out[c] = pd.NA
+    out = out[OUT_WARRANTS_RAW_COLS]
+
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    out["form"] = out["form"].astype(str).str.upper()
+    for c in ("accessionNumber","primaryDocument","source_url","table_heading","row_label"):
+        out[c] = out[c].astype("string")
+
+    out["filingDate"] = pd.to_datetime(out["filingDate"], errors="coerce").dt.date.astype("string")
+    out["reportDate"] = pd.to_datetime(out["reportDate"], errors="coerce").dt.date.astype("string")
+    out["acceptanceDateTime"] = pd.to_datetime(out["acceptanceDateTime"], errors="coerce").astype("string")
+    out["warrant_expiration_date"] = pd.to_datetime(out["warrant_expiration_date"], errors="coerce").dt.date.astype("string")
+
+    for c in ("warrants_outstanding","exercise_price_usd","warrant_term_years","units_multiplier","score"):
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    if "is_total_row" in out.columns:
+        out["is_total_row"] = out["is_total_row"].astype("boolean")
+
+    # keep only identifiable rows
+    out = out.dropna(subset=["ticker","accessionNumber","source_url"], how="any")
+
+    # optional: drop header-ish rows with no count
+    out = out[(out["warrants_outstanding"].notna()) & (out["warrants_outstanding"] >= 1)]
+
+    # de-dupe by (filing row)
+    out = out.drop_duplicates(
+        subset=["accessionNumber","source_url","row_label"], keep="last"
+    ).reset_index(drop=True)
+
+    return out
+
+def insert_outstanding_warrants_raw_df(table: str, df: pd.DataFrame, chunk_size: int = 500) -> dict:
+    sb = get_supabase()
+    df2 = prep_outstanding_warrants_raw_df(df)
+    if df2.empty:
+        return {"attempted": 0, "sent": 0}
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i+chunk_size]
+        sb.table(table).insert(batch).execute()
+        sent += len(batch)
+    return {"attempted": len(df2), "sent": sent}
+
+def upsert_outstanding_warrants_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    on_conflict: str = "accessionNumber,source_url,row_label",
+    do_update: bool = False,
+    chunk_size: int = 500,
+) -> dict:
+    """
+    Recommended unique index:
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_outstanding_warrants_raw
+      ON public."Outstanding_warrants_raw"(accessionNumber, source_url, row_label);
+    """
+    sb = get_supabase()
+    df2 = prep_outstanding_warrants_raw_df(df)
+    if df2.empty:
+        return {"attempted": 0, "sent": 0}
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i+chunk_size]
+        sb.table(table).upsert(
+            batch,
+            on_conflict=on_conflict,
+            ignore_duplicates=(not do_update),
+            returning="minimal",
+        ).execute()
+        sent += len(batch)
+    return {"attempted": len(df2), "sent": sent}

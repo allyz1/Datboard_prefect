@@ -71,6 +71,38 @@ def _expand_cover_blocks(blocks: List[str], max_prim: int = 15) -> List[str]:
     out.extend(norm[n:])
     return out
 
+def _collapse_dual_class_to_single_row(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """
+    For tickers with dual-class cover-page lines (e.g., MSTR),
+    return exactly one row:
+      - choose the 'best' row to retain non-share fields (latest filingDate, then highest score)
+      - sum outstanding_shares across all rows from the same filing (same accessionNumber)
+    """
+    if df.empty:
+        return df
+
+    tk = (ticker or "").upper()
+    if tk != "MSTR":
+        return df  # only special-case MSTR per request
+
+    # Choose 'best' row to keep other fields from: newest filing first, then highest score
+    best = df.sort_values(["filingDate", "score"], ascending=[False, False]).iloc[0]
+    acc = best.get("accessionNumber")
+
+    # Sum all outstanding_shares that belong to this filing (same accession)
+    same_filing = df[df["accessionNumber"] == acc].copy()
+    total_shares = pd.to_numeric(same_filing["outstanding_shares"], errors="coerce").sum(min_count=1)
+
+    # Build single-row output, keeping the "rest of the values" from the best row
+    out = best.copy()
+    out["outstanding_shares"] = total_shares
+
+    # (Optional) keep original text as-is; or uncomment to make it explicit:
+    # out["outstanding_shares_text"] = f"Total (Class A + Class B) from filing {acc}"
+
+    # Return as a one-row DataFrame
+    return pd.DataFrame([out])
+
 def _extract_report_date_from_blocks(blocks: List[str]) -> tuple[Optional[str], Optional[str]]:
     """
     Returns (report_date_text, report_date_iso) if a 'period ended' line is found.
@@ -239,6 +271,7 @@ def build_for_ticker(
         ["ticker","filingDate","accessionNumber","score"],
         ascending=[True, True, True, False]
     ).reset_index(drop=True)
+    df = _collapse_dual_class_to_single_row(df, ticker)
 
     df = df[[c for c in cols if c in df.columns]]
     return df

@@ -61,7 +61,7 @@ from app.sec.outstanding_warrants import collect_recent_accessions as WRECENT
 from app.sec.outstanding_warrants import collect_warrant_rows_for_ticker as WROWS
 
 # Supabase uploader for Outstanding_warrants_raw
-from app.clients.supabase_append import upsert_outstanding_warrants_raw_df
+from app.clients.supabase_append import insert_outstanding_warrants_raw_df
 
 
 DEFAULT_TABLE = "Holdings_raw"
@@ -322,7 +322,7 @@ def t_upload_warrants_new(
         limit=600,
         max_docs=6,
         max_snips=4,
-        upsert=True,  # uses (accessionNumber, source_url, event_type_final) unique index
+        upsert=do_upsert,  # uses (accessionNumber, source_url, event_type_final) unique index
         on_conflict="accessionNumber,source_url,event_type_final",
         chunk_size=500,
     )
@@ -363,12 +363,11 @@ def t_warrants_outstanding_df(tickers: list[str], since_hours: int = 24) -> pd.D
 def t_upload_warrants_outstanding(df: pd.DataFrame) -> dict:
     if df is None or df.empty:
         return {"attempted": 0, "sent": 0}
-    return upsert_outstanding_warrants_raw_df(
-        table="Outstanding_warrants_raw",
-        df=df,
-        on_conflict="accessionNumber,source_url,row_label",
-        do_update=False,
-    )
+    return insert_outstanding_warrants_raw_df(
+       table="Outstanding_warrants_raw",
+       df=df,
+       chunk_size=500,
+   )
 
 
 # ---------------- NEW: SEC cash → Noncrypto_holdings_raw ----------------

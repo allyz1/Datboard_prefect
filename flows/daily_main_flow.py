@@ -306,6 +306,7 @@ def t_upload_warrants_new(
     tickers: list[str],
     recent_hours: int = 24,
     table: str = "Warrants_new_iss_raw",
+    do_upsert: bool = False
 ) -> dict:
     """
     End-to-end: run the Warrants NEW ISSUANCE extractor for the last N hours
@@ -483,6 +484,7 @@ def daily_main_pipeline(
     outstanding_hours: int = 24,
     pipes_hours: int = 24,
     warrants_hours: int = 24,
+    warrants_do_upsert: bool = False
 ):
     logger = get_run_logger()
     tickers = tickers or DEFAULT_TICKERS
@@ -588,6 +590,7 @@ def daily_main_pipeline(
         tickers=tickers,
         recent_hours=warrants_hours,
         table="Warrants_new_iss_raw",
+        do_upsert=warrants_do_upsert,
     ).result()
     logger.info(f"[Warrants_new_iss_raw] attempted={warr_stats.get('attempted', 0)} sent={warr_stats.get('sent', 0)}")
     # Outstanding Warrants (row-level) → Outstanding_warrants_raw

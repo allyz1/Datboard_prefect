@@ -14,7 +14,7 @@ from typing import Any, List
 # ========= CONFIG =========
 POLYGON_BASE = "https://api.polygon.io"
 API_KEY = os.getenv("POLYGON_API_KEY", "BZAKLfIESg1ZfdJ0ldE49tplxBcj3jcW")  # ← prefer env var in prod
-TICKERS = ["MSTR","CEP","SMLR","NAKA","BMNR","SBET","ETHZ","BTCS","SQNS","BTBT","DFDV","UPXI"]  # ← edit as needed
+TICKERS = ["MSTR","CEP","SMLR","NAKA","BMNR","SBET","ETHZ","BTCS","SQNS","BTBT","DFDV","UPXI", "ORBS"]  # ← edit as needed
 ADJUSTED = True     # adjusted prices
 TIMEOUT = 20
 MAX_RETRIES = 3

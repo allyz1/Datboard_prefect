@@ -21,6 +21,7 @@ from app.crawlers.btcs_daily import get_btcs_eth_holdings_df
 from app.crawlers.upxi_daily import crawl_holdings_df
 from app.pipelines.ETH_SEC_holdings_main import get_sec_eth_holdings_df
 from app.pipelines.BTC_SEC_holdings_main import get_sec_btc_holdings_df
+from app.pipelines.SOL_SEC_holdings import get_sec_sol_holdings_df
 
 # ATM timeline + Supabase ATM helpers
 from app.sec.ATM_daily import collect_timelines
@@ -106,6 +107,15 @@ def t_sec_btc() -> pd.DataFrame:
         forms=("8-K","10-K","10-Q"),
         verbose=False,
     )
+@task(retries=2, retry_delay_seconds=60)
+def t_sec_sol() -> pd.DataFrame:
+    return get_sec_sol_holdings_df(
+        tickers="HSDT,FORD",
+        hours_back=24,
+        forms=("8-K","10-K","10-Q"),   # match BTC style; expand if you want
+        verbose=False,
+    )
+
 
 # ---------------- Coinbase prices task ----------------
 @task(retries=2, retry_delay_seconds=60)
@@ -501,9 +511,10 @@ def daily_main_pipeline(
     f5 = t_sec_eth.submit()
     f6 = t_sec_btc.submit()
     f7 = t_upxi.submit()  # if you want to include UPXI holdings
+    f8 = t_sec_sol.submit()  # if you want to include SOL holdings
 
     # 2) Collect & upload holdings
-    frames = [f.result() for f in (f1, f2, f3, f4, f5, f6, f7)]
+    frames = [f.result() for f in (f1, f2, f3, f4, f5, f6, f7, f8)]
     stats_holdings = concat_and_upload(table, frames, do_update=do_update)
     logger.info(
         f"[Holdings -> {table}] attempted={stats_holdings['attempted']} "

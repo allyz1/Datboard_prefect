@@ -19,8 +19,8 @@ HEADERS = {
 }
 
 # ---- date parsing ----
-MONTHS_RX = r"(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-MDY_RX = re.compile(rf"{MONTHS_RX}\s+\d{{1,2}},\s+(\d{{4}})", re.I)  # group(1) = year
+MONTHS_RX = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+MDY_RX = re.compile(rf"{MONTHS_RX}\s+\d{{1,2}},\s+(\d{{4}})", re.I)
 YMD_RX = re.compile(r"\b(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])\b")
 
 # ---- numeric helpers ----
@@ -43,6 +43,19 @@ def _num_with_unit_to_float(text: str) -> Optional[float]:
     if unit == "million": val *= 1_000_000
     elif unit == "billion": val *= 1_000_000_000
     return val
+def _mdy_to_year_and_iso(m):
+    s = m.group(0)
+    for fmt in ("%B %d, %Y", "%b %d, %Y"):
+        try:
+            d = datetime.datetime.strptime(s, fmt).date()
+            return d.year, d.isoformat()
+        except ValueError:
+            pass
+    # last-resort fallback if the regex had a year group
+    try:
+        return int(m.group(1)), None
+    except Exception:
+        return None, None
 
 # ---- SOL patterns ----
 SOL_UNIT  = r"(?:SOL|Solana)"
@@ -95,32 +108,50 @@ def list_links(doc: html.HtmlElement) -> List[Tuple[str, str]]:
     return items
 
 def parse_release_year_and_date(doc: html.HtmlElement) -> Tuple[Optional[int], Optional[str]]:
-    # look for "Released <Month DD, YYYY>"
+    """
+    Try to extract (year, ISO date) from a Upexi IR press release page.
+    Looks first for a 'Released <Month DD, YYYY>' stamp, then falls back to body text.
+    Returns (year, 'YYYY-MM-DD') or (year, None) if the date string can't be parsed fully,
+    or (None, None) if nothing is found.
+    """
+    def _mdy_to_year_and_iso(s: str) -> Tuple[Optional[int], Optional[str]]:
+        # Parse full or abbreviated month names without relying on regex group indices
+        for fmt in ("%B %d, %Y", "%b %d, %Y"):
+            try:
+                d = datetime.datetime.strptime(s, fmt).date()
+                return d.year, d.isoformat()
+            except ValueError:
+                pass
+        # Fallback: pull just the 4-digit year if present
+        ym = re.search(r"\b(20\d{2})\b", s)
+        return (int(ym.group(1)), None) if ym else (None, None)
+
+    # 1) Look for "Released <Month DD, YYYY>"
     txts = doc.xpath("//*[contains(translate(., 'RELEASED', 'released'), 'released')]/text()")
-    joined = " ".join(t.strip() for t in txts if t.strip())
+    joined = " ".join(t.strip() for t in txts if t and t.strip())
     m = MDY_RX.search(joined)
     if m:
-        y = int(m.group(1))  # correct group for year
-        try:
-            dt = datetime.datetime.strptime(m.group(0), "%B %d, %Y").date().isoformat()
-        except Exception:
-            dt = None
-        return y, dt
-    # fallback: scan body
-    main_txt = " ".join(doc.xpath("//article//text()") or doc.xpath("//main//text()") or doc.xpath("//body//text()"))
+        y, dt = _mdy_to_year_and_iso(m.group(0))
+        if y is not None:
+            return y, dt
+
+    # 2) Fallback: scan main body text
+    main_txt_nodes = doc.xpath("//article//text()") or doc.xpath("//main//text()") or doc.xpath("//body//text()")
+    main_txt = " ".join(main_txt_nodes)
     main_txt = re.sub(r"\s+", " ", main_txt)
     m2 = MDY_RX.search(main_txt)
     if m2:
-        y = int(m2.group(1))
-        try:
-            dt = datetime.datetime.strptime(m2.group(0), "%B %d, %Y").date().isoformat()
-        except Exception:
-            dt = None
-        return y, dt
+        y, dt = _mdy_to_year_and_iso(m2.group(0))
+        if y is not None:
+            return y, dt
+
+    # 3) Final fallback: YYYY-MM-DD anywhere in the body
     m3 = YMD_RX.search(main_txt)
     if m3:
         return int(m3.group(1)), m3.group(0)
+
     return None, None
+
 
 def extract_sol_events(text: str) -> List[Dict[str, Any]]:
     """Return a list of events: {'record_type': 'purchase'|'intent'|'holdings', 'SOL': float|None}"""

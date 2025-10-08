@@ -36,6 +36,8 @@ RX_COVER_WAS = re.compile(
     re.I | re.S,
 )
 
+# Add near top with the other patterns:
+SEC_VARIANTS = r"(?:our\s+|the\s+)?(?:registrant[’']s\s+)?(?:class\s+[a-z]\s+)?(?:common\s+stock|ordinary\s+shares?)"
 
 
 # “Indicate the number of shares outstanding ... : 182,435,019 as of March 7, 2025.”
@@ -49,15 +51,16 @@ RX_INDICATE = re.compile(
 RX_ASOF_THEREWERE = re.compile(
     rf"\bas\s+of\s+(?P<date>{DATE_RX.pattern})\b.{0,200}?\b(?:there\s+were|we\s+had)\s*"
     rf"(?P<num>{SHARES_SCALED_RX.pattern}|\d[\d,\.]*)\s*(?:shares)?"
-    rf"(?:\s+of\s+(?:our\s+)?(?:common\s+stock|ordinary\s+shares))?"
+    rf"(?:\s+of\s+{SEC_VARIANTS})?"
     rf"(?:.{0,200}?)(?:issued\s+and\s+outstanding|outstanding)\b",
     re.I | re.S,
 )
 
+
 # “There were/ We had NUM shares ... outstanding ... as of DATE” (reversed order)
 RX_THEREWERE_ASOF = re.compile(
     rf"\b(?:there\s+were|we\s+had)\s*(?P<num>{SHARES_SCALED_RX.pattern}|\d[\d,\.]*)\s*(?:shares)?"
-    rf"(?:\s+of\s+(?:our\s+)?(?:common\s+stock|ordinary\s+shares))?"
+    rf"(?:\s+of\s+{SEC_VARIANTS})?"
     rf"(?:.{0,200}?)(?:issued\s+and\s+outstanding|outstanding)\b"
     rf".{0,200}?\bas\s+of\s+(?P<date>{DATE_RX.pattern})\b",
     re.I | re.S,
@@ -67,7 +70,7 @@ RX_THEREWERE_ASOF = re.compile(
 RX_ASOF_HAD_NUM = re.compile(
     rf"\bas\s+of\s+(?P<date>{DATE_RX.pattern})\b.{0,200}?\b{SUBJ_VERB}\s*"
     rf"(?P<num>{SHARES_SCALED_RX.pattern}|\d[\d,\.]*)\s*(?:shares)?"
-    rf"(?:\s+of\s+(?:our\s+)?(?:common\s+stock|ordinary\s+shares))?"
+    rf"(?:\s+of\s+{SEC_VARIANTS})?"
     rf"(?:.{0,200}?)(?:issued\s+and\s+outstanding|outstanding)\b",
     re.I | re.S,
 )
@@ -77,7 +80,7 @@ RX_ASOF_HAD_OUTSTANDING_NUM = re.compile(
     rf"\bas\s+of\s+(?P<date>{DATE_RX.pattern})\b.{0,200}?\b{SUBJ_VERB}\s+"
     rf"(?:issued\s+and\s+outstanding|outstanding)\b.{0,120}?"
     rf"(?P<num>{SHARES_SCALED_RX.pattern}|\d[\d,\.]*)\s*(?:shares)?"
-    rf"(?:\s+of\s+(?:our\s+)?(?:common\s+stock|ordinary\s+shares))?",
+    rf"(?:\s+of\s+{SEC_VARIANTS})?",
     re.I | re.S,
 )
 
@@ -85,7 +88,7 @@ RX_ASOF_HAD_OUTSTANDING_NUM = re.compile(
 RX_HAD_NUM_ASOF = re.compile(
     rf"\b{SUBJ_VERB}\s*"
     rf"(?P<num>{SHARES_SCALED_RX.pattern}|\d[\d,\.]*)\s*(?:shares)?"
-    rf"(?:\s+of\s+(?:our\s+)?(?:common\s+stock|ordinary\s+shares))?"
+    rf"(?:\s+of\s+{SEC_VARIANTS})?"
     rf"(?:.{0,200}?)(?:issued\s+and\s+outstanding|outstanding)\b"
     rf".{0,200}?\bas\s+of\s+(?P<date>{DATE_RX.pattern})\b",
     re.I | re.S,
@@ -94,11 +97,17 @@ RX_ASOF_GENERIC = re.compile(
     rf"\bas\s+of\s+(?P<date>{DATE_RX.pattern})\b"
     rf".{{0,200}}?\b{SUBJ_VERB}\s*"
     rf"(?P<num>{SHARES_SCALED_RX.pattern}|\d[\d,\.]*)\s*(?:shares)?"
-    rf"(?:\s+of\s+(?:our\s+)?(?:common\s+stock|ordinary\s+shares))?"
+    rf"(?:\s+of\s+{SEC_VARIANTS})?"
     rf"(?:.{{0,240}}?)(?:issued\s+and\s+outstanding|outstanding)\b",
     re.I | re.S,
 )
-
+# Fallback: "There were NUM shares ... outstanding ... as of DATE" with arbitrary text between
+RX_FALLBACK_THEREWERE = re.compile(
+    rf"\b(?:there\s+were|we\s+had)\s*(?P<num>{SHARES_SCALED_RX.pattern}|\d[\d,\.]*)\s*(?:shares)\b"
+    rf".{{0,240}}?\boutstanding\b"
+    rf".{{0,240}}?\bas\s+of\s+(?P<date>{DATE_RX.pattern})\b",
+    re.I | re.S,
+)
 
 
 # Require we’re in the right neighborhood
@@ -108,7 +117,7 @@ RX_SECURITY = re.compile(r"\b(common\s+stock|ordinary\s+shares?)\b", re.I)
 def _first_match(text: str):
     for rx in (RX_COVER_WAS, RX_INDICATE, RX_ASOF_THEREWERE, RX_THEREWERE_ASOF,
                RX_ASOF_HAD_NUM, RX_ASOF_HAD_OUTSTANDING_NUM, RX_HAD_NUM_ASOF,
-               RX_ASOF_GENERIC):
+               RX_ASOF_GENERIC, RX_FALLBACK_THEREWERE):
         m = rx.search(text)
         if m:
             return m, rx
@@ -133,7 +142,7 @@ def classify_block(block: str, filing_form: str) -> List[DealHit]:
       - snippet (trimmed)
     """
     t = block
-    if not (RX_CONTEXT_REQUIRED.search(t) and RX_SECURITY.search(t)):
+    if not RX_CONTEXT_REQUIRED.search(t):
         return []
 
     m, _ = _first_match(t)

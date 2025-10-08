@@ -65,7 +65,7 @@ from app.clients.supabase_append import insert_outstanding_warrants_raw_df
 
 
 DEFAULT_TABLE = "Holdings_raw"
-DEFAULT_TICKERS = ["MSTR","CEP","SMLR","NAKA","BMNR","SBET","ETHZ","BTCS","SQNS","BTBT","DFDV","UPXI"]
+DEFAULT_TICKERS = ["MSTR","CEP","SMLR","NAKA","BMNR","SBET","ETHZ","BTCS","SQNS","BTBT","DFDV","UPXI","HSDT","FORD"]  # ← edit as needed
 
 # ---------------- Holdings tasks ----------------
 @task(retries=2, retry_delay_seconds=60)

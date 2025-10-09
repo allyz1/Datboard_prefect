@@ -5,7 +5,7 @@ from prefect.runner.storage import GitRepository
 from prefect.blocks.system import Secret
 
 LONG_TICKERS = [
-    "MSTR","CEP","SMLR","NAKA","BMNR","SBET","ETHZ","BTCS","SQNS","BTBT","DFDV","UPXI"
+    "MSTR","CEP","SMLR","NAKA","BMNR","SBET","ETHZ","BTCS","SQNS","BTBT","DFDV","UPXI","HSDT","FORD"
 ]
 
 if __name__ == "__main__":
@@ -19,12 +19,20 @@ if __name__ == "__main__":
         work_pool_name="managed-pool",
         schedule=CronSchedule(cron="0 6 * * *", timezone="America/Los_Angeles"),
         parameters={
-            "table": "Holdings_raw",
-            "do_update": False,
-            "tickers": LONG_TICKERS,        # 👈 one list for Polygon + ATM
-            "atm_hours": 24,
-            "atm_do_upsert": False,
-        },
+         "table": "Holdings_raw",
+         "do_update": False,
+         "tickers": LONG_TICKERS,
+         "atm_hours": 24,
+         "atm_do_upsert": False,
+         "polygon_extra_tickers": ["ORBS"],
+         "sec_cash_hours": 24,
+         "reg_direct_hours": 24,
+         "reg_direct_do_upsert": True,
+         "outstanding_hours": 24,
+         "pipes_hours": 24,
+         "warrants_hours": 24,
+         "warrants_do_upsert": False,
+     },
         job_variables={
             "pip_packages": [
                 "pandas","numpy","requests","beautifulsoup4","lxml",

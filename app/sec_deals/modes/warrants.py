@@ -2,7 +2,7 @@
 from __future__ import annotations
 import re
 from typing import List, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime
 from dateutil.relativedelta import relativedelta  # pip install python-dateutil
 
 from ..core.types import DealHit
@@ -64,17 +64,30 @@ RX_PREF_ONLY_WARRANT = re.compile(
     re.I,
 )
 
-# Accept $x, $x.x, $x.xx, and tiny decimals like $0.0001 (3–6 dp), and optional thousands/commas
-_MONEY_FLEX_RX = r"\$(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d{1,6})?"
+# ---- MONEY token (support $, US$, USD 5.00) ----
+_MONEY_FLEX_RX = r"(?:(?:US\$|USD)\s*)?\$\s?\d{1,3}(?:,\d{3})*(?:\.\d{1,6})?"
+
+# Exercise price (direct phrasings + reversed)
 PRICE_PER_SH_RX = re.compile(
-    rf"(?:exercise\s+price(?:\s+per\s+share)?\s*(?:of|:)?\s*{_MONEY_FLEX_RX}"
-    rf"|\b{_MONEY_FLEX_RX}\s+exercise\s+price\b)",
+    rf"(?:an?\s+)?exercise\s+price(?:\s+per\s+(?:share|warrant\s+share))?\s*(?:of|equal\s+to|=|:)?\s*(?P<money>{_MONEY_FLEX_RX})"
+    rf"|(?P<money_rev>{_MONEY_FLEX_RX})\s*(?:per\s+(?:share|warrant\s+share))?\s*exercise\s+price\b"
+    rf"|each\s+at\s+an?\s+exercise\s+price\s*(?:of|=)?\s*(?P<money_each>{_MONEY_FLEX_RX})",
     re.I,
 )
 
-# Exercise price (formula / non-$)
+# Fallback: money + 'exercise price' near a 'warrant' mention (for terse summaries)
+NEAR_WARRANT_PRICE_RX = re.compile(
+    rf"warrants?.{{0,160}}?(?:exercise\s+price(?:\s+per\s+(?:share|warrant\s+share))?\s*(?:of|=|equal\s+to|:)?\s*)?(?P<money>{_MONEY_FLEX_RX})"
+    r"|(?P<money2>{_MONEY_FLEX_RX}).{0,80}?exercise\s+price",
+    re.I | re.S,
+)
+
+# Exercise price (formula / non-$) — broader phrasing
 EX_PRICE_FORMULA_RX = re.compile(
-    r"(initial\s+)?exercise\s+price\s+(?:equal\s+to|of)\s+.+?(?:\.|;|,|\n)", re.I,
+    r"(?:initial\s+)?(?:the\s+)?exercise\s+price(?:\s+per\s+(?:share|warrant\s+share))?"
+    r"\s*(?:shall\s+be|will\s+be|is|was|be)?\s*(?:set\s+at\s+(?:a\s+)?price\s+)?"
+    r"(?:equal\s+to|of)\s+.+?(?:\.|;|,|\n)",
+    re.I | re.S,
 )
 EXCLUDES_RX = re.compile(
     r"\b(excludes?|does\s+not\s+include|does\s+not\s+reflect|not\s+include(?:d)?)\b.{0,40}?\b(warrants?)\b",
@@ -167,8 +180,8 @@ SECURITY_TYPES_RX = re.compile(
     re.I,
 )
 
-# Token for distance scoring
-RX_WARRANT_TOKEN = re.compile(r"\b(pre[-\s]?funded|prefunded)?\s*warrants?\b", re.I)
+# Token for distance scoring (same source as RX_WARRANT)
+RX_WARRANT_TOKEN = RX_WARRANT
 
 # Warrant share counts (explicit)
 WARRANT_TO_PURCHASE_RX = re.compile(
@@ -292,17 +305,52 @@ def _nearest_distance(anchor_spans: List[Tuple[int,int]], target_span: Tuple[int
     return best
 
 def _money_phrase_wr(text: str) -> Optional[str]:
+    """
+    Prefer explicit 'exercise price' phrasings first, then a safe near-warrant fallback.
+    Returns a normalized money phrase (e.g., '$5.00').
+    """
     m = PRICE_PER_SH_RX.search(text)
-    if not m:
+    if m:
+        grp = m.groupdict()
+        val = grp.get("money") or grp.get("money_rev") or grp.get("money_each")
+        if val:
+            i, j = m.span()
+            window = text[max(0, i-80): min(len(text), j+80)]
+            if _BAD_MONEY_CONTEXT_RX.search(window):
+                return None
+            # allow $0.0001 only when context is clearly pre-funded warrant
+            if re.search(r"\$0\.0{2,}\d+", val) and not re.search(r"pre[-\s]?funded\s+warrant", window, re.I):
+                return None
+            return re.sub(r"\s+", " ", val).strip()
+
+    # Fallback: look near 'warrant' + 'exercise price' window
+    m2 = NEAR_WARRANT_PRICE_RX.search(text)
+    if m2:
+        val = m2.group("money") or m2.group("money2")
+        if val:
+            i, j = m2.span()
+            window = text[max(0, i-120): min(len(text), j+120)]
+            if _BAD_MONEY_CONTEXT_RX.search(window):
+                return None
+            if re.search(r"\$0\.0{2,}\d+", val) and not re.search(r"pre[-\s]?funded\s+warrant", window, re.I):
+                return None
+            return re.sub(r"\s+", " ", val).strip()
+
+    return None
+
+# --- NEW: parse constant price from "formula" phrasing when safe ---
+_CONST_PRICE_GUARD_RX = re.compile(
+    r"\b(VWAP|volume[-\s]*weighted|average|closing|market price|bid|ask|greater|less|lower|higher|min|max|whichever)\b",
+    re.I,
+)
+
+def _constant_money_from_formula(s: Optional[str]) -> Optional[str]:
+    if not s:
         return None
-    i, j = m.span()
-    window = text[max(0, i-80): min(len(text), j+80)]
-    if _BAD_MONEY_CONTEXT_RX.search(window):
+    if _CONST_PRICE_GUARD_RX.search(s):
         return None
-    # allow $0.0001 if explicitly “pre-funded warrant”
-    if re.search(r"\$0\.0{2,}\d+", m.group(0)) and not re.search(r"pre[-\s]?funded\s+warrant", window, re.I):
-        return None
-    return re.sub(r"\s+", " ", m.group(0)).strip()
+    m = re.search(_MONEY_FLEX_RX, s)
+    return m.group(0) if m else None
 
 def _shares_phrase_wr(text: str) -> Optional[str]:
     for rx in (WARRANT_SHARES_CTX_RX, RX_WARRANT_SHARES_UNDERLYING, RX_WARRANT_SHARES_LABEL):
@@ -530,7 +578,16 @@ def classify_block(block: str, filing_form: str) -> List[DealHit]:
     if not exercise_text:
         m_exf = EX_PRICE_FORMULA_RX.search(t)
         if m_exf:
-            exercise_formula_text = re.sub(r"\s+", " ", m_exf.group(0)).strip()
+            s = re.sub(r"\s+", " ", m_exf.group(0)).strip()
+            # Optional: shorten to begin at 'exercise price' for neatness
+            p = re.search(r"exercise price.*", s, re.I)
+            exercise_formula_text = p.group(0) if p else s
+
+    # If the 'formula' is actually a constant price, mirror it into exercise_text
+    if not exercise_text and exercise_formula_text:
+        const_from_formula = _constant_money_from_formula(exercise_formula_text)
+        if const_from_formula:
+            exercise_text = const_from_formula
 
     # Prefunded vs standard underlying share counts
     shares_bucket  = _extract_warrant_share_counts(t)
@@ -575,11 +632,8 @@ def classify_block(block: str, filing_form: str) -> List[DealHit]:
 
     gross_text = money_phrase(_first(GROSS_PROCEEDS_RX, t))
 
-    # Expiration / term / issuance
+    # Expiration / term / issuance (still parsed for gating/score; no longer emitted as text fields)
     exp_date_text, term_years, issuance_date_text = _expiry_from_text_enhanced(t)
-    computed_exp_date_iso = None
-    if not exp_date_text and issuance_date_text and term_years:
-        computed_exp_date_iso = _compute_expiration_date(issuance_date_text, term_years)
 
     # Warrant instrument counts (not underlying)
     warrant_instruments_text = None
@@ -624,16 +678,11 @@ def classify_block(block: str, filing_form: str) -> List[DealHit]:
     if not any([exercise_text, exercise_formula_text, pfw_text, std_text, exp_date_text, term_years, coverage_text]):
         return []
 
-    # Security types mentioned (normalized)
+    # Security types (no longer emitted as text field)
     sec_types = sorted(set(re.findall(SECURITY_TYPES_RX, t)))
-    sec_types_text = " | ".join(sorted({s.lower() for s in sec_types})) if sec_types else None
-
-    # Prefunded vs standard flags (explicit boolean hints for downstream)
-    warrant_prefunded_flag = True if pfw_text or (pfw_num is not None) else (True if RX_PREFUNDED.search(t) else None)
-    warrant_standard_flag  = True if std_text or (std_num is not None) else None
 
     # ----------------------------
-    # Build hit
+    # Build hit (trimmed schema: drop coverage/blockers/gross/expiry/issuance/security-types text fields)
     # ----------------------------
     h: DealHit = {
         "event_type_final": "warrant_terms",
@@ -652,20 +701,8 @@ def classify_block(block: str, filing_form: str) -> List[DealHit]:
         # Instrument counts
         "warrant_instruments_text":     warrant_instruments_text,
 
-        # Other terms
-        "warrant_coverage_text":        coverage_text,
-        "ownership_blocker_text":       blocker_text,
-        "gross_proceeds_text":          gross_text,
-        "expiration_date_text":         exp_date_text,
-        "expiration_date_iso":          computed_exp_date_iso,
-        "warrant_term_years":           term_years,
-        "issuance_date_text":           issuance_date_text,
-        "security_types_text":          sec_types_text,
-
-        # Warrant typing / flags
-        "warrant_type":                 warrant_type,          # "prefunded" | "standard" | "mixed" | None
-        "warrant_prefunded_flag":       warrant_prefunded_flag, # True | False(None if unknown)
-        "warrant_standard_flag":        warrant_standard_flag,  # True | None
+        # Warrant typing
+        "warrant_type":                 warrant_type,  # "prefunded" | "standard" | "mixed" | None
 
         # Role & fees
         "h_warrant_role":               warrant_role,          # "agent" | "investor" | None
@@ -675,15 +712,20 @@ def classify_block(block: str, filing_form: str) -> List[DealHit]:
         "snippet": t if len(t) <= 900 else (t[:880] + " …"),
     }
 
-    # Parsed numerics
-    h["exercise_price_usd"]             = parse_scaled_number_from_phrase(exercise_text)
+    # Derive _usd from either exercise_text (direct) OR formula when it carries a constant
+    h["exercise_price_usd"] = (
+        parse_scaled_number_from_phrase(h["exercise_price_text"])
+        or parse_scaled_number_from_phrase(h["exercise_price_text_formula"])
+    )
     h["shares_issued"]                  = parse_shares_from_phrase(shares_text) if shares_text else None
     h["warrant_shares_prefunded"]       = pfw_num
     h["warrant_shares_outstanding"]     = std_num
     h["warrant_instruments"]            = warrant_instruments
-    h["warrant_prefunded_flag"] = (h.get("warrant_type") == "prefunded") or (h.get("warrant_type") == "mixed")
-    h["warrant_standard_flag"]  = (h.get("warrant_type") == "standard")  or (h.get("warrant_type") == "mixed")
 
+    # Derive boolean flags from type (single source of truth)
+    wt = h.get("warrant_type")
+    h["warrant_prefunded_flag"] = True if wt in ("prefunded", "mixed") else (False if wt == "standard" else None)
+    h["warrant_standard_flag"]  = True if wt in ("standard", "mixed")  else (False if wt == "prefunded" else None)
 
     h["warrant_coverage_pct"]           = parse_pct_from_phrase(coverage_text)
     if h["warrant_coverage_pct"] is None:

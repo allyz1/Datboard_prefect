@@ -498,7 +498,8 @@ def daily_main_pipeline(
     outstanding_hours: int = 24,
     pipes_hours: int = 24,
     warrants_hours: int = 24,
-    warrants_do_upsert: bool = False
+    warrants_do_upsert: bool = False,
+    polygon_extra_tickers: list[str] | None = None,
 ):
     logger = get_run_logger()
     tickers = tickers or DEFAULT_TICKERS
@@ -533,7 +534,9 @@ def daily_main_pipeline(
         stats_cb = {"attempted": 0, "sent": 0}
 
     # 4) Polygon daily prices (last 3 days) → `polygon`
-    polygon_df = t_polygon_prices.submit(tickers, adjusted=True).result()
+    # Polygon-only ticker set (union base tickers with any extras)
+    polygon_tickers = sorted(set((tickers or []) + (polygon_extra_tickers or [])))
+    polygon_df = t_polygon_prices.submit(polygon_tickers, adjusted=True).result()
 
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_key = os.getenv("SUPABASE_SERVICE_KEY")

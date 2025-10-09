@@ -240,7 +240,7 @@ def build_for_ticker(
         # instruments (count of warrants issued)
         "warrant_instruments_text","warrant_instruments",
         # role & fees
-        "h_warrant_role","agent_fee_text","agent_fee_pct",
+        "h_warrant_role","agent_fee_text","agent_fee_pct","expiration_date",
         # provenance
         "source_url","exhibit_hint","snippet","score",
     ]

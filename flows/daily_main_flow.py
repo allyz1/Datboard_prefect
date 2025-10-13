@@ -65,6 +65,13 @@ from app.sec.outstanding_warrants import collect_warrant_rows_for_ticker as WROW
 # Supabase uploader for Outstanding_warrants_raw
 from app.clients.supabase_append import insert_outstanding_warrants_raw_df
 
+# Recent filings upload helper
+from app.clients.supabase_append import run_pull_files_daily_and_upload
+
+# CoinGecko supply data
+from app.prices.coingecko import get_coingecko_supply_data_simple
+from app.clients.upload_coinbase import upload_crypto_supply_df
+
 
 DEFAULT_TABLE = "Holdings_raw"
 DEFAULT_TICKERS = ["MSTR","CEP","SMLR","NAKA","BMNR","SBET","ETHZ","BTCS","SQNS","BTBT","DFDV","UPXI","HSDT","FORD"]  # ← edit as needed
@@ -484,6 +491,55 @@ def t_sec_cash_noncrypto(
                 f"skipped={stats['skipped_existing']} sent={stats['sent']}")
     return stats
 
+@task(retries=2, retry_delay_seconds=60)
+def t_recent_filings(
+    tickers: list[str],
+    top_n: int = 5,
+    table: str = "Recent_filings",
+) -> dict:
+    """
+    End-to-end: run the pull_files script and upload to Supabase.
+    Fetches the top N most recent filings for each ticker.
+    """
+    logger = get_run_logger()
+    logger.info(f"[Recent_filings] Processing {len(tickers)} tickers, top {top_n} filings each")
+    
+    return run_pull_files_daily_and_upload(
+        tickers=tickers,
+        table=table,
+        top_n=top_n,
+        chunk_size=500,
+    )
+
+@task(retries=2, retry_delay_seconds=60)
+def t_crypto_supply() -> dict:
+    """
+    Fetch crypto supply data from CoinGecko and upload to Supabase.
+    Gets current supply data for BTC, ETH, and SOL.
+    """
+    logger = get_run_logger()
+    logger.info("[Crypto_supply] Fetching supply data from CoinGecko")
+    
+    # Get supply data
+    df = get_coingecko_supply_data_simple()
+    
+    if df.empty:
+        logger.warning("[Crypto_supply] No supply data retrieved")
+        return {"attempted": 0, "sent": 0, "skipped_existing": 0}
+    
+    # Upload to Supabase
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
+    
+    if not supabase_url or not supabase_key:
+        logger.error("[Crypto_supply] Missing SUPABASE_URL or SUPABASE_SERVICE_KEY")
+        return {"attempted": 0, "sent": 0, "skipped_existing": 0}
+    
+    stats = upload_crypto_supply_df(supabase_url, supabase_key, df)
+    logger.info(f"[Crypto_supply] attempted={stats['attempted']} sent={stats['sent']}")
+    
+    return stats
+
 # ---------------- Flow ----------------
 @flow(name="daily-main-pipeline", log_prints=True)
 def daily_main_pipeline(
@@ -621,6 +677,17 @@ def daily_main_pipeline(
         logger.info("[Outstanding_warrants_raw] No warrant rows in requested window.")
         ow_stats = {"attempted": 0, "sent": 0}
 
+    # Recent Filings → Recent_filings
+    recent_filings_stats = t_recent_filings.submit(
+        tickers=tickers,
+        top_n=5,
+        table="Recent_filings",
+    ).result()
+    logger.info(f"[Recent_filings] attempted={recent_filings_stats.get('attempted', 0)} sent={recent_filings_stats.get('sent', 0)}")
+
+    # Crypto Supply Data → Crypto_supply
+    crypto_supply_stats = t_crypto_supply.submit().result()
+    logger.info(f"[Crypto_supply] attempted={crypto_supply_stats.get('attempted', 0)} sent={crypto_supply_stats.get('sent', 0)}")
 
     return {
         "holdings": stats_holdings,
@@ -633,6 +700,8 @@ def daily_main_pipeline(
         "pipes_raw": pipes_stats,
         "warrants_new_iss_raw": warr_stats,
         "outstanding_warrants_raw": ow_stats,
+        "recent_filings": recent_filings_stats,
+        "crypto_supply": crypto_supply_stats,
     }
 
 if __name__ == "__main__":

@@ -1105,3 +1105,100 @@ def upsert_outstanding_warrants_raw_df(
         ).execute()
         sent += len(batch)
     return {"attempted": len(df2), "sent": sent}
+
+# ===== Recent_filings upload helpers =====
+RECENT_FILINGS_TABLE = "Recent_filings"
+
+RECENT_FILINGS_COLS = [
+    "filingDate", "ticker", "form", "accessionNumber", "cik", "source_url"
+]
+
+def prep_recent_filings_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize recent filings DataFrame for insertion into Recent_filings.
+    Append-only: assumes table has an identity PK; we do NOT send 'key'.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=RECENT_FILINGS_COLS)
+
+    out = df.copy()
+
+    # Ensure expected columns exist
+    for c in RECENT_FILINGS_COLS:
+        if c not in out.columns:
+            out[c] = pd.NA
+    out = out[RECENT_FILINGS_COLS]
+
+    # Types / casing
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    out["form"] = out["form"].astype(str).str.upper()
+    out["accessionNumber"] = out["accessionNumber"].astype("string")
+    out["cik"] = out["cik"].astype("string")
+    out["source_url"] = out["source_url"].astype("string")
+
+    # Dates -> ISO date (string)
+    out["filingDate"] = pd.to_datetime(out["filingDate"], errors="coerce").dt.date.astype("string")
+
+    # Drop rows missing critical identifiers
+    out = out.dropna(subset=["ticker", "accessionNumber", "source_url"], how="any")
+
+    # De-dupe by (accessionNumber, source_url) to avoid exact duplicates
+    out = out.drop_duplicates(subset=["accessionNumber", "source_url"], keep="last").reset_index(drop=True)
+    return out
+
+
+def insert_recent_filings_df(
+    table: str,
+    df: pd.DataFrame,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    Append-only insert into Recent_filings.
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+
+    sb = get_supabase()
+    df2 = prep_recent_filings_df(df)
+    if df2.empty:
+        return {"attempted": 0, "sent": 0}
+
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
+
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i + chunk_size]
+        sb.table(table).insert(batch).execute()
+        sent += len(batch)
+
+    return {"attempted": len(df2), "sent": sent}
+
+
+def run_pull_files_daily_and_upload(
+    tickers: List[str],
+    *,
+    table: str = RECENT_FILINGS_TABLE,
+    top_n: int = 5,
+    chunk_size: int = 500,
+) -> Dict[str, int]:
+    """
+    End-to-end: run the pull_files script and upload to Supabase.
+    
+    Returns a dict with counts, e.g. {"attempted": X, "sent": Y}.
+    """
+    if not tickers:
+        return {"attempted": 0, "sent": 0}
+
+    # Lazy import to avoid heavy deps at module import time
+    try:
+        from app.sec_deals.drivers.pull_files import gather_recent_filings
+    except Exception:
+        from sec_deals.drivers.pull_files import gather_recent_filings  # fallback if installed as top-level
+
+    df = gather_recent_filings(tickers=tickers, top_n=top_n)
+    
+    return insert_recent_filings_df(
+        table=table,
+        df=df,
+        chunk_size=chunk_size,
+    )

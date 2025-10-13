@@ -7,11 +7,11 @@ from functools import lru_cache
 
 import pandas as pd
 
-from sec_deals.core.fetch import resolve_cik, fetch_filings, list_filing_files, get
-from sec_deals.core.select import candidate_html_urls, Mode
-from sec_deals.core.extract import html_to_blocks
-from sec_deals.core.types import DealHit
-from sec_deals.modes import warrants as mode_impl
+from app.sec_deals.core.fetch import resolve_cik, fetch_filings, list_filing_files, get
+from app.sec_deals.core.select import candidate_html_urls, Mode
+from app.sec_deals.core.extract import html_to_blocks
+from app.sec_deals.core.types import DealHit
+from app.sec_deals.modes import warrants as mode_impl
 
 # Forms to scan
 ALLOWED_FORMS = ("8-K", "S-1", "S-3", "424B5", "424B3", "424B7")

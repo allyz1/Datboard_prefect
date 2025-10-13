@@ -6,7 +6,7 @@ from typing import List, Dict
 
 import pandas as pd
 
-from sec_deals.core.fetch import resolve_cik, fetch_filings
+from app.sec_deals.core.fetch import resolve_cik, fetch_filings
 
 ALLOWED_FORMS = ("8-K", "10-K", "10-Q", "S-1", "S-3", "424B5", "424B3", "424B7")
 _SUFFIX_OK = ("A", "MEF", "ASR")  # S-1/A, S-3ASR, S-1MEF, etc.

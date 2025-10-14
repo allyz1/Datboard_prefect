@@ -814,7 +814,7 @@ WARRANTS_NEW_COLS = [
     "warrant_coverage_text","warrant_coverage_pct",
     "ownership_blocker_text","ownership_blocker_pct",
     # term / dates
-    "expiration_date_text","warrant_term_years","issuance_date_text",
+    "warrant_term_years","issuance_date_text",
     # money / security types / roles
     "gross_proceeds_text","security_types_text",
     "h_warrant_role","agent_fee_text","agent_fee_pct",
@@ -868,7 +868,7 @@ def prep_warrants_new_iss_raw_df(df: pd.DataFrame) -> pd.DataFrame:
         "warrant_shares_prefunded_text","warrant_shares_outstanding_text",
         "warrant_type","warrant_instruments_text",
         "warrant_coverage_text","ownership_blocker_text",
-        "expiration_date_text","gross_proceeds_text","source_url","snippet",
+        "gross_proceeds_text","source_url","snippet",
     ]
     for c in text_cols:
         out[c] = out[c].astype("string")

@@ -19,6 +19,7 @@ from app.crawlers.dfdv_daily import get_dfdv_holdings_df
 from app.crawlers.naka_daily import get_nakamoto_holdings_df
 from app.crawlers.btcs_daily import get_btcs_eth_holdings_df
 from app.crawlers.upxi_daily import crawl_holdings_df
+from app.crawlers.hsdt_daily import get_hsdt_holdings_df
 from app.pipelines.ETH_SEC_holdings_main import get_sec_eth_holdings_df
 from app.pipelines.BTC_SEC_holdings_main import get_sec_btc_holdings_df
 from app.pipelines.SOL_SEC_holdings import get_sec_sol_holdings_df
@@ -92,6 +93,10 @@ def t_naka() -> pd.DataFrame:
 @task(retries=2, retry_delay_seconds=60)
 def t_upxi() -> pd.DataFrame:
     return crawl_holdings_df(ticker="UPXI", min_year=2025)
+
+@task(retries=2, retry_delay_seconds=60)
+def t_hsdt() -> pd.DataFrame:
+    return get_hsdt_holdings_df(hours=24, ticker="HSDT", asset="SOL")
 
 @task(retries=2, retry_delay_seconds=60)
 def t_btcs() -> pd.DataFrame:
@@ -569,9 +574,10 @@ def daily_main_pipeline(
     f6 = t_sec_btc.submit()
     f7 = t_upxi.submit()  # if you want to include UPXI holdings
     f8 = t_sec_sol.submit()  # if you want to include SOL holdings
+    f9 = t_hsdt.submit()  # HSDT SOL holdings from press releases
 
     # 2) Collect & upload holdings
-    frames = [f.result() for f in (f1, f2, f3, f4, f5, f6, f7, f8)]
+    frames = [f.result() for f in (f1, f2, f3, f4, f5, f6, f7, f8, f9)]
     stats_holdings = concat_and_upload(table, frames, do_update=do_update)
     logger.info(
         f"[Holdings -> {table}] attempted={stats_holdings['attempted']} "

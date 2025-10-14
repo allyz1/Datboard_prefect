@@ -1195,3 +1195,69 @@ def run_pull_files_daily_and_upload(
         df=df,
         chunk_size=chunk_size,
     )
+
+def insert_polygon_outstanding_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    chunk_size: int = 500,
+) -> dict:
+    """
+    Insert Polygon ticker overview data to Polygon_outstanding_raw table.
+    
+    Args:
+        table: Table name (should be "Polygon_outstanding_raw")
+        df: DataFrame with ticker overview data
+        chunk_size: Number of rows per batch
+        
+    Returns:
+        Dictionary with upload statistics
+    """
+    sb = get_supabase()
+    
+    if df.empty:
+        return {"attempted": 0, "sent": 0, "errors": []}
+    
+    # Prepare DataFrame - ensure proper data types
+    df2 = df.copy()
+    
+    # Convert date columns
+    if 'query_date' in df2.columns:
+        df2['query_date'] = pd.to_datetime(df2['query_date'], errors='coerce').dt.date
+    
+    # Convert numeric columns
+    numeric_cols = ['market_cap', 'share_class_shares_outstanding', 'weighted_shares_outstanding']
+    for col in numeric_cols:
+        if col in df2.columns:
+            df2[col] = pd.to_numeric(df2[col], errors='coerce')
+    
+    # Convert to records for upload
+    records = df2.to_dict('records')
+    
+    # Clean records
+    clean_records = []
+    for r in records:
+        clean_r = {}
+        for k, v in r.items():
+            clean_r[k] = _json_safe(v)
+        clean_records.append(clean_r)
+    
+    if not clean_records:
+        return {"attempted": 0, "sent": 0, "errors": ["No valid records after cleaning"]}
+    
+    # Upload in chunks
+    total_sent = 0
+    errors = []
+    
+    for i in range(0, len(clean_records), chunk_size):
+        chunk = clean_records[i:i + chunk_size]
+        try:
+            result = sb.table(table).insert(chunk).execute()
+            total_sent += len(chunk)
+        except Exception as e:
+            errors.append(f"Chunk {i//chunk_size + 1}: {str(e)}")
+    
+    return {
+        "attempted": len(clean_records),
+        "sent": total_sent,
+        "errors": errors
+    }

@@ -12,6 +12,7 @@ from app.prices.coinbase import get_last_n_days_excluding_today  # date, product
 # Polygon helpers (fetch + upload)
 from app.prices.polygon_daily import fetch_polygon_daily_range_one_ticker
 from app.clients.upload_polygon import upload_polygon_df
+from app.prices.polygon_ticker_overview import fetch_polygon_ticker_overview_daily, upload_polygon_ticker_overview_df
 
 # Producers (holdings + SEC)
 from app.crawlers.sequans_bitcoin_api_scraper import get_sequans_holdings_df
@@ -182,6 +183,21 @@ def t_polygon_prices(tickers: list[str], adjusted: bool = True) -> pd.DataFrame:
         return combined.reindex(columns=cols)
 
     return pd.DataFrame(columns=["ticker","date","open","high","low","close","volume","transactions","vwap"])
+
+@task(retries=2, retry_delay_seconds=60)
+def t_polygon_ticker_overview(tickers: list[str], target_date: date = None) -> pd.DataFrame:
+    """Fetch ticker overview data for yesterday (or specified date) for all tickers."""
+    logger = get_run_logger()
+    logger.info(f"[Polygon Ticker Overview] Fetching for {len(tickers)} tickers")
+    
+    df = fetch_polygon_ticker_overview_daily(tickers, target_date)
+    
+    if df.empty:
+        logger.warning("[Polygon Ticker Overview] No data retrieved")
+    else:
+        logger.info(f"[Polygon Ticker Overview] Retrieved {len(df)} records")
+    
+    return df
 
 # ---------------- ATM tasks ----------------
 @task(retries=2, retry_delay_seconds=60)
@@ -395,6 +411,14 @@ def t_upload_warrants_outstanding(df: pd.DataFrame) -> dict:
        df=df,
        chunk_size=500,
    )
+
+@task(retries=2, retry_delay_seconds=60)
+def t_upload_polygon_ticker_overview(df: pd.DataFrame) -> dict:
+    """Upload Polygon ticker overview data to Polygon_outstanding_raw table."""
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0}
+    
+    return upload_polygon_ticker_overview_df(df, "Polygon_outstanding_raw")
 
 
 # ---------------- NEW: SEC cash → Noncrypto_holdings_raw ----------------
@@ -615,6 +639,14 @@ def daily_main_pipeline(
         else:
             logger.warning("[Prices -> polygon] No rows produced for last 3 days.")
             polygon_stats = {"attempted": 0, "sent": 0}
+
+    # 4.5) Polygon ticker overview (yesterday) → Polygon_outstanding_raw
+    polygon_overview_df = t_polygon_ticker_overview.submit(tickers).result()
+    if polygon_overview_df is not None and not polygon_overview_df.empty:
+        polygon_overview_stats = t_upload_polygon_ticker_overview.submit(polygon_overview_df).result()
+        logger.info(f"[Polygon_outstanding_raw] attempted={polygon_overview_stats.get('attempted', 0)} sent={polygon_overview_stats.get('sent', 0)}")
+    else:
+        logger.info("[Polygon_outstanding_raw] No ticker overview data for yesterday.")
 
     # 5) ATM timeline → ATM_raw  (same tickers)
     atm_df = t_atm_timeline.submit(tickers, hours=atm_hours).result()

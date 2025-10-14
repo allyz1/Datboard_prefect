@@ -807,17 +807,13 @@ WARRANTS_NEW_COLS = [
     "warrant_shares_prefunded_text","warrant_shares_prefunded",
     "warrant_shares_outstanding_text","warrant_shares_outstanding",
     # typing / flags
-    "warrant_type","warrant_prefunded_flag","warrant_standard_flag",
-    # instruments (count of warrants issued)
-    "warrant_instruments_text","warrant_instruments",
-    # coverage / blockers
-    "warrant_coverage_text","warrant_coverage_pct",
-    "ownership_blocker_text","ownership_blocker_pct",
-    # term / dates
-    "warrant_term_years","issuance_date_text",
-    # money / security types / roles
-    "gross_proceeds_text","security_types_text",
+    "warrant_type","warrant_prefunded_flag",
+    # coverage / blockers (only pct fields exist in table)
+    "warrant_coverage_pct","ownership_blocker_pct",
+    # roles / fees
     "h_warrant_role","agent_fee_text","agent_fee_pct",
+    # dates (table has expiration_date, not expiration_date_text/iso)
+    "expiration_date",
     # provenance
     "source_url","exhibit_hint","snippet","score",
 ]
@@ -845,18 +841,16 @@ def prep_warrants_new_iss_raw_df(df: pd.DataFrame) -> pd.DataFrame:
     out["event_type_final"] = out["event_type_final"].astype("string")
     out["exhibit_hint"] = out["exhibit_hint"].astype("string")
     out["h_warrant_role"] = out["h_warrant_role"].astype("string")
-    out["security_types_text"] = out["security_types_text"].astype("string")
 
     # Dates -> ISO date (string)
     out["filingDate"] = pd.to_datetime(out["filingDate"], errors="coerce").dt.date.astype("string")
-    out["issuance_date_text"] = out["issuance_date_text"].astype("string")
 
     # Numerics
     num_cols = [
         "exercise_price_usd","shares_issued",
         "warrant_shares_prefunded","warrant_shares_outstanding",
-        "warrant_instruments","warrant_coverage_pct","ownership_blocker_pct",
-        "warrant_term_years","agent_fee_pct","score",
+        "warrant_coverage_pct","ownership_blocker_pct",
+        "agent_fee_pct","score",
     ]
     for c in num_cols:
         out[c] = pd.to_numeric(out[c], errors="coerce")
@@ -866,15 +860,15 @@ def prep_warrants_new_iss_raw_df(df: pd.DataFrame) -> pd.DataFrame:
         "exercise_price_text","exercise_price_text_formula",
         "shares_issued_text",
         "warrant_shares_prefunded_text","warrant_shares_outstanding_text",
-        "warrant_type","warrant_instruments_text",
-        "warrant_coverage_text","ownership_blocker_text",
-        "gross_proceeds_text","source_url","snippet",
+        "warrant_type",
+        "h_warrant_role","agent_fee_text",
+        "expiration_date","source_url","snippet",
     ]
     for c in text_cols:
         out[c] = out[c].astype("string")
 
     # Booleans where present
-    for c in ("warrant_prefunded_flag","warrant_standard_flag"):
+    for c in ("warrant_prefunded_flag",):
         if c in out.columns:
             out[c] = out[c].astype("boolean")
 

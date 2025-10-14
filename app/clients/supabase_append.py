@@ -814,7 +814,7 @@ WARRANTS_NEW_COLS = [
     "warrant_coverage_text","warrant_coverage_pct",
     "ownership_blocker_text","ownership_blocker_pct",
     # term / dates
-    "expiration_date_text","expiration_date_iso","warrant_term_years","issuance_date_text",
+    "expiration_date_text","warrant_term_years","issuance_date_text",
     # money / security types / roles
     "gross_proceeds_text","security_types_text",
     "h_warrant_role","agent_fee_text","agent_fee_pct",
@@ -849,7 +849,6 @@ def prep_warrants_new_iss_raw_df(df: pd.DataFrame) -> pd.DataFrame:
 
     # Dates -> ISO date (string)
     out["filingDate"] = pd.to_datetime(out["filingDate"], errors="coerce").dt.date.astype("string")
-    out["expiration_date_iso"] = pd.to_datetime(out["expiration_date_iso"], errors="coerce").dt.date.astype("string")
     out["issuance_date_text"] = out["issuance_date_text"].astype("string")
 
     # Numerics

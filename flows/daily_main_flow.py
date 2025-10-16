@@ -74,6 +74,9 @@ from app.clients.supabase_append import run_pull_files_daily_and_upload
 from app.prices.coingecko import get_coingecko_supply_data_simple
 from app.clients.upload_coinbase import upload_crypto_supply_df
 
+# Market rankings
+from app.prices.polygon_market import get_market_volume_ranks, upload_rankings_to_supabase
+
 
 DEFAULT_TABLE = "Holdings_raw"
 DEFAULT_TICKERS = ["MSTR","CEP","SMLR","NAKA","BMNR","SBET","ETHZ","BTCS","SQNS","BTBT","DFDV","UPXI","HSDT","FORD"]  # ← edit as needed
@@ -569,6 +572,53 @@ def t_crypto_supply() -> dict:
     
     return stats
 
+@task(retries=2, retry_delay_seconds=60)
+def t_market_rankings(tickers: list[str], target_date: str = None) -> dict:
+    """Fetch market volume rankings and upload to Supabase."""
+    logger = get_run_logger()
+    
+    # Use yesterday if no date provided
+    if target_date is None:
+        target_date = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+    
+    # Get API key
+    api_key = os.getenv("POLYGON_API_KEY")
+    if not api_key:
+        logger.error("POLYGON_API_KEY not found")
+        return {"attempted": 0, "sent": 0, "errors": ["Missing API key"]}
+    
+    try:
+        logger.info(f"[Stock_rankings_daily_pull] Fetching market rankings for {target_date}")
+        
+        # Get market rankings
+        df_ranks, dat_ranks = get_market_volume_ranks(
+            target_date=target_date,
+            api_key=api_key,
+            dat_tickers=tickers,
+            include_otc=False
+        )
+        
+        if dat_ranks.empty:
+            logger.warning(f"No DAT tickers found in market data for {target_date}")
+            return {"attempted": 0, "sent": 0, "errors": ["No DAT tickers found"]}
+        
+        # Upload to Supabase
+        upload_result = upload_rankings_to_supabase(
+            df_ranks=dat_ranks,
+            table_name="Stock_rankings_daily_pull",
+            replace_table=True
+        )
+        
+        logger.info(f"[Stock_rankings_daily_pull] attempted={upload_result['attempted']} sent={upload_result['sent']}")
+        if upload_result['errors']:
+            logger.warning(f"[Stock_rankings_daily_pull] errors: {upload_result['errors']}")
+        
+        return upload_result
+        
+    except Exception as e:
+        logger.error(f"[Stock_rankings_daily_pull] Error: {e}")
+        return {"attempted": 0, "sent": 0, "errors": [str(e)]}
+
 # ---------------- Flow ----------------
 @flow(name="daily-main-pipeline", log_prints=True)
 def daily_main_pipeline(
@@ -727,6 +777,10 @@ def daily_main_pipeline(
     crypto_supply_stats = t_crypto_supply.submit().result()
     logger.info(f"[Crypto_supply] attempted={crypto_supply_stats.get('attempted', 0)} sent={crypto_supply_stats.get('sent', 0)}")
 
+    # Market Rankings → Stock_rankings_daily_pull
+    market_rankings_stats = t_market_rankings.submit(tickers).result()
+    logger.info(f"[Stock_rankings_daily_pull] attempted={market_rankings_stats.get('attempted', 0)} sent={market_rankings_stats.get('sent', 0)}")
+
     return {
         "holdings": stats_holdings,
         "coinbase": stats_cb,
@@ -740,6 +794,7 @@ def daily_main_pipeline(
         "outstanding_warrants_raw": ow_stats,
         "recent_filings": recent_filings_stats,
         "crypto_supply": crypto_supply_stats,
+        "stock_rankings_daily_pull": market_rankings_stats,
     }
 
 if __name__ == "__main__":

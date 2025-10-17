@@ -1261,3 +1261,109 @@ def insert_polygon_outstanding_raw_df(
         "sent": total_sent,
         "errors": errors
     }
+
+# ===== Stock_rankings_daily_pull upload helpers =====
+STOCK_RANKINGS_TABLE = "Stock_rankings_daily_pull"
+
+STOCK_RANKINGS_COLS = [
+    "date", "ticker", "is_dat",
+    "transactions", "dollar_volume",
+    "rank_dollar_volume", "rank_transactions", "rank_change_perc",
+    "todays_change_perc"
+]
+
+def prep_stock_rankings_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normalize stock rankings DataFrame for insertion into Stock_rankings_daily_pull.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=STOCK_RANKINGS_COLS)
+
+    out = df.copy()
+
+    # Ensure expected columns exist
+    for c in STOCK_RANKINGS_COLS:
+        if c not in out.columns:
+            out[c] = pd.NA
+    out = out[STOCK_RANKINGS_COLS]
+
+    # Types / casing
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    
+    # Dates -> ISO date (string)
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date.astype("string")
+
+    # Numeric columns
+    numeric_cols = [
+        "transactions", "dollar_volume",
+        "rank_dollar_volume", "rank_transactions", "rank_change_perc",
+        "todays_change_perc"
+    ]
+    for c in numeric_cols:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+
+    # Boolean columns
+    if "is_dat" in out.columns:
+        out["is_dat"] = out["is_dat"].astype(bool)
+
+    # Drop rows missing critical identifiers
+    out = out.dropna(subset=["ticker", "date"], how="any")
+
+    # De-dupe by (ticker, date)
+    out = out.drop_duplicates(subset=["ticker", "date"], keep="last").reset_index(drop=True)
+    return out
+
+def insert_stock_rankings_df(
+    table: str,
+    df: pd.DataFrame,
+    chunk_size: int = 1000,
+) -> Dict[str, int]:
+    """
+    Insert stock rankings data into Stock_rankings_daily_pull table.
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0, "errors": []}
+
+    sb = get_supabase()
+    df2 = prep_stock_rankings_df(df)
+    
+    if df2.empty:
+        return {"attempted": 0, "sent": 0, "errors": []}
+
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
+
+    sent = 0
+    errors = []
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i + chunk_size]
+        try:
+            sb.table(table).insert(batch).execute()
+            sent += len(batch)
+        except Exception as e:
+            errors.append(f"Chunk {i//chunk_size + 1}: {str(e)}")
+
+    return {"attempted": len(df2), "sent": sent, "errors": errors}
+
+def replace_stock_rankings_table(
+    table: str,
+    df: pd.DataFrame,
+    chunk_size: int = 1000,
+) -> Dict[str, int]:
+    """
+    Replace all data in Stock_rankings_daily_pull table with new data.
+    """
+    if df is None or df.empty:
+        return {"attempted": 0, "sent": 0, "errors": []}
+
+    sb = get_supabase()
+    
+    try:
+        # Clear existing data
+        print(f"Clearing existing data from {table}...")
+        sb.table(table).delete().neq("ticker", "").execute()
+        
+        # Insert new data
+        return insert_stock_rankings_df(table, df, chunk_size)
+    except Exception as e:
+        return {"attempted": 0, "sent": 0, "errors": [f"Replace failed: {str(e)}"]}

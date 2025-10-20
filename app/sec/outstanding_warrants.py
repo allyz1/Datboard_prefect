@@ -583,12 +583,16 @@ def extract_warrant_records(
                         break
 
         if rec["exercise_price_usd"] is None:
+            # Only look for money values (with $ or in typical price ranges)
             for j in range(1, w):
                 if j < len(r):
-                    v = parse_money(r[j])
-                    if v is not None and v > 0:
-                        rec["exercise_price_usd"] = v
-                        break
+                    cell = r[j] or ""
+                    # Only consider cells that look like prices (have $ or are in typical price ranges)
+                    if "$" in cell or (parse_money(cell) is not None and parse_money(cell) > 0 and parse_money(cell) < 1000):
+                        v = parse_money(cell)
+                        if v is not None and v > 0:
+                            rec["exercise_price_usd"] = v
+                            break
 
         if rec["warrant_expiration_date"] is None:
             for cell in r:

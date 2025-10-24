@@ -16,14 +16,14 @@ def test_supabase_connection():
     try:
         from app.clients.supabase_append import get_supabase
         sb = get_supabase()
-        print("✓ Supabase connection successful")
+        print("Supabase connection successful")
         return True
     except KeyError as e:
-        print(f"✗ Missing environment variable: {e}")
+        print(f"Missing environment variable: {e}")
         print("Required: SUPABASE_URL and SUPABASE_SERVICE_KEY")
         return False
     except Exception as e:
-        print(f"✗ Supabase connection failed: {e}")
+        print(f"Supabase connection failed: {e}")
         return False
 
 def test_upload_function():
@@ -56,7 +56,7 @@ def test_upload_function():
         return result
         
     except Exception as e:
-        print(f"✗ Upload test failed: {e}")
+        print(f"Upload test failed: {e}")
         import traceback
         traceback.print_exc()
         return None

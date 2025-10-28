@@ -58,6 +58,10 @@ def gather_recent_filings(
             print(f"[{tk}] No allowed forms.")
             continue
 
+        # Deduplicate by accessionNumber to avoid multiple rows per filing
+        # (e.g., when multiple documents exist for the same 8-K)
+        f = f.drop_duplicates(subset=["accessionNumber"], keep="first")
+
         f = f.sort_values(
             ["acceptanceDateTime", "filingDate"],
             ascending=[False, False],
@@ -96,7 +100,7 @@ def main():
         default="MSTR,CEP,SMLR,NAKA,BMNR,SBET,ETHZ,BTCS,SQNS,BTBT,DFDV,UPXI,HSDT,FORD",
         help="Comma-separated tickers (hardcoded default list)."
     )
-    ap.add_argument("--top", type=int, default=5, help="Top N most recent filings per ticker.")
+    ap.add_argument("--top", type=int, default=10, help="Top N most recent filings per ticker.")
     ap.add_argument("--outdir", default="data", help="Output directory")
     ap.add_argument("--outfile", default="", help="Override output filename (CSV)")
 

@@ -73,7 +73,7 @@ def _expand_cover_blocks(blocks: List[str], max_prim: int = 15) -> List[str]:
 
 def _collapse_dual_class_to_single_row(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     """
-    For tickers with dual-class cover-page lines (e.g., MSTR),
+    For tickers with dual-class cover-page lines (e.g., MSTR, KIDZ),
     return exactly one row:
       - choose the 'best' row to retain non-share fields (latest filingDate, then highest score)
       - sum outstanding_shares across all rows from the same filing (same accessionNumber)
@@ -82,8 +82,10 @@ def _collapse_dual_class_to_single_row(df: pd.DataFrame, ticker: str) -> pd.Data
         return df
 
     tk = (ticker or "").upper()
-    if tk != "MSTR":
-        return df  # only special-case MSTR per request
+    DUAL_CLASS_TICKERS = ["MSTR", "KIDZ"]
+    
+    if tk not in DUAL_CLASS_TICKERS:
+        return df  # only special-case dual-class tickers
 
     # Choose 'best' row to keep other fields from: newest filing first, then highest score
     best = df.sort_values(["filingDate", "score"], ascending=[False, False]).iloc[0]
@@ -234,8 +236,11 @@ def build_for_ticker(
 
             # classify blocks for outstanding shares
             hits: List[DealHit] = []
-            for b in scan_blocks:
-                for h in mode_impl.classify_block(b, form):
+            for j, b in enumerate(scan_blocks):
+                # Call classify
+                hits_here = mode_impl.classify_block(b, form)
+
+                for h in hits_here:
                     h.update({
                         "ticker": ticker,
                         "filingDate": fdt,

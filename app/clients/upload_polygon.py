@@ -79,7 +79,7 @@ def upload_polygon_df(
     df: pd.DataFrame,
     *,
     table: str = "polygon",
-    on_conflict: str = "key",   # switch to 'date,ticker' if you use a composite PK
+    on_conflict: str = "date,ticker",   # switch to 'date,ticker' if you use a composite PK
     chunk_size: int = 1000
 ):
     recs = df_to_records_clean_polygon(df)

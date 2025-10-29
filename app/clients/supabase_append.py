@@ -1146,7 +1146,8 @@ def insert_recent_filings_df(
     chunk_size: int = 500,
 ) -> Dict[str, int]:
     """
-    Append-only insert into Recent_filings.
+    Upsert into Recent_filings using accessionNumber as the unique key.
+    Duplicate accession numbers will be ignored (no update).
     """
     if df is None or df.empty:
         return {"attempted": 0, "sent": 0}
@@ -1161,7 +1162,12 @@ def insert_recent_filings_df(
     sent = 0
     for i in range(0, len(payload), chunk_size):
         batch = payload[i:i + chunk_size]
-        sb.table(table).insert(batch).execute()
+        sb.table(table).upsert(
+            batch,
+            on_conflict="accessionNumber",
+            ignore_duplicates=True,
+            returning="minimal",
+        ).execute()
         sent += len(batch)
 
     return {"attempted": len(df2), "sent": sent}

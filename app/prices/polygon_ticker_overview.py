@@ -7,6 +7,7 @@ and uploads to Polygon_outstanding_raw table.
 """
 
 import os
+import sys
 import time
 from datetime import datetime, date, timedelta
 from typing import Dict, List, Any, Optional
@@ -34,8 +35,10 @@ RETRY_DELAY = 2.0
 
 # Default tickers from the main flow
 DEFAULT_TICKERS = [
-    "MSTR", "CEP", "SMLR", "NAKA", "BMNR", "SBET", "ETHZ", "BTCS", 
-    "SQNS", "BTBT", "DFDV", "UPXI", "HSDT", "FORD"
+    "MSTR", "CEP", "SMLR", "NAKA", "SQNS", "BMNR", "SBET", "ETHZ", "BTCS", "BTBT",
+    "GAME", "DFDV", "UPXI", "HSDT", "FORD", "ETHM", "STSS", "FGNX", "STKE", "MARA",
+    "DJT", "GLXY", "CLSK", "BRR", "GME", "EMPD", "CORZ", "FLD", "USBC", "LMFA",
+    "DEFT", "GNS", "BTCM", "ICG", "COSM", "KIDZ"
 ]
 
 class DailyPolygonTickerClient:
@@ -48,19 +51,7 @@ class DailyPolygonTickerClient:
     
     def _handle_rate_limit(self):
         """Handle rate limiting with burst detection"""
-        current_time = time.time()
-        time_since_last = current_time - self.last_request_time
-        
-        # Always wait at least the base delay
-        if time_since_last < RATE_LIMIT_DELAY:
-            time.sleep(RATE_LIMIT_DELAY - time_since_last)
-        
-        # Check for burst limit
-        if self.request_count > 0 and self.request_count % RATE_LIMIT_BURST == 0:
-            self.logger.info(f"Rate limit burst detected after {self.request_count} requests. Waiting {BURST_DELAY}s...")
-            time.sleep(BURST_DELAY)
-        
-        self.last_request_time = time.time()
+        # Rate limiting disabled - process requests immediately
         self.request_count += 1
     
     def _make_request(self, url: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
@@ -255,52 +246,126 @@ def upload_polygon_ticker_overview_df(df: pd.DataFrame, table: str = "Polygon_ou
         logger.error(f"Upload failed: {e}")
         return {"attempted": len(df), "sent": 0, "errors": [str(e)]}
 
+def daterange(start_date: date, end_date: date):
+    """Generate dates from start_date to end_date (inclusive)"""
+    d = start_date
+    while d <= end_date:
+        yield d
+        d += timedelta(days=1)
+
 def main():
-    """Standalone execution for testing"""
+    """Standalone execution for testing with single date OR date range"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Fetch Polygon ticker overview data for yesterday")
+    parser = argparse.ArgumentParser(description="Fetch Polygon ticker overview data")
+    # existing single-date flag (still supported)
     parser.add_argument("--date", help="Date to fetch (YYYY-MM-DD), defaults to yesterday")
+    
+    # NEW: date range flags
+    parser.add_argument("--start", help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end", help="End date (YYYY-MM-DD)")
+    
     parser.add_argument("--tickers", nargs="+", help="Ticker symbols to fetch")
     parser.add_argument("--table", default="Polygon_outstanding_raw", help="Target table name")
     parser.add_argument("--dry-run", action="store_true", help="Fetch data but don't upload")
     
+    # NEW: output CSV path
+    parser.add_argument("--out", help="Path to output CSV (when using --start/--end or --date)")
+    
     args = parser.parse_args()
     
-    # Parse date
-    target_date = None
+    # Parse dates
+    single_date = None
+    start_date = None
+    end_date = None
+    
+    if args.date and (args.start or args.end):
+        print("Error: use either --date OR --start/--end, not both.")
+        sys.exit(1)
+    
     if args.date:
         try:
-            target_date = datetime.strptime(args.date, '%Y-%m-%d').date()
+            single_date = datetime.strptime(args.date, '%Y-%m-%d').date()
         except ValueError:
             print(f"Error: Invalid date format '{args.date}'. Use YYYY-MM-DD")
+            sys.exit(1)
+    
+    if args.start or args.end:
+        if not (args.start and args.end):
+            print("Error: --start and --end must be provided together.")
+            sys.exit(1)
+        try:
+            start_date = datetime.strptime(args.start, '%Y-%m-%d').date()
+            end_date = datetime.strptime(args.end, '%Y-%m-%d').date()
+        except ValueError:
+            print("Error: Invalid date format for --start/--end. Use YYYY-MM-DD")
+            sys.exit(1)
+        if end_date < start_date:
+            print("Error: --end must be on/after --start.")
             sys.exit(1)
     
     # Use provided tickers or defaults
     tickers = args.tickers or DEFAULT_TICKERS
     
-    print(f"Fetching ticker overview data for {len(tickers)} tickers")
-    if target_date:
-        print(f"Target date: {target_date}")
+    # Helper to safely call the Prefect task synchronously
+    # Check if it's a task and get the underlying function
+    fetch_fn = getattr(fetch_polygon_ticker_overview_daily, "fn", fetch_polygon_ticker_overview_daily)
+    
+    # Collect DataFrames
+    dfs = []
+    
+    if single_date:
+        print(f"Fetching {len(tickers)} tickers for {single_date}")
+        df = fetch_fn(tickers, single_date)
+        if not df.empty:
+            dfs.append(df)
     else:
-        print("Target date: yesterday")
+        # Range or fallback to yesterday
+        if start_date and end_date:
+            print(f"Fetching {len(tickers)} tickers for range {start_date} → {end_date}")
+            for d in daterange(start_date, end_date):
+                print(f"- {d}")
+                df = fetch_fn(tickers, d)
+                if not df.empty:
+                    dfs.append(df)
+        else:
+            # original behavior: yesterday
+            print(f"Fetching {len(tickers)} tickers (target date: yesterday)")
+            df = fetch_fn(tickers, None)
+            if not df.empty:
+                dfs.append(df)
     
-    # Fetch data
-    df = fetch_polygon_ticker_overview_daily(tickers, target_date)
-    
-    if df.empty:
-        print("No data retrieved")
+    if not dfs:
+        print("No data retrieved.")
         return
     
-    print(f"\nRetrieved {len(df)} records:")
-    print(df.to_string(index=False))
+    # Concatenate all results
+    out_df = pd.concat(dfs, ignore_index=True)
     
-    if not args.dry_run:
-        # Upload data
-        stats = upload_polygon_ticker_overview_df(df, args.table)
+    # Ensure numeric columns are typed properly (avoid empty-string issues)
+    for col in ["market_cap", "share_class_shares_outstanding", "weighted_shares_outstanding"]:
+        if col in out_df.columns:
+            out_df[col] = pd.to_numeric(out_df[col], errors="coerce")
+    
+    # Output CSV if requested (or if a range was used)
+    if args.out:
+        out_path = args.out
+    elif start_date and end_date:
+        out_path = f"polygon_overview_{start_date.isoformat()}_to_{end_date.isoformat()}.csv"
+    elif single_date:
+        out_path = f"polygon_overview_{single_date.isoformat()}.csv"
+    else:
+        out_path = "polygon_overview_yesterday.csv"
+    
+    out_df.to_csv(out_path, index=False)
+    print(f"Wrote {len(out_df)} rows to {out_path}")
+    
+    # Upload only if NOT dry-run and only for single day (keep range runs offline by default)
+    if not args.dry_run and not (start_date and end_date):
+        stats = upload_polygon_ticker_overview_df(out_df, args.table)
         print(f"\nUpload stats: {stats}")
     else:
-        print("\nDry run - data not uploaded")
+        print("\nDry run or range mode - data not uploaded")
 
 if __name__ == "__main__":
     main()

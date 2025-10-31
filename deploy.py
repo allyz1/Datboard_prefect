@@ -5,7 +5,7 @@ from prefect.runner.storage import GitRepository
 from prefect.blocks.system import Secret
 
 LONG_TICKERS = [
-    "MSTR","CEP","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV","UPXI","HSDT","FORD", "ETHM","STSS","FGNX", "STKE","MARA","DJT","GLXY","CLSK","BRR","GME","EMPD","EXOD","CORZ","FLD","USBC","LMFA","DEFT","GNS","BTCM","ICG","COSM","KIDZ"
+    "MSTR","CEP","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV","UPXI","HSDT","FORD","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR","GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","BTCM","ICG","COSM","KIDZ"
 ]
 
 if __name__ == "__main__":

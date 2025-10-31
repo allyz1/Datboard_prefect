@@ -2,8 +2,7 @@
 from __future__ import annotations
 import argparse
 from pathlib import Path
-from typing import List, Dict, Any, Set
-from functools import lru_cache
+from typing import List, Dict, Any
 
 import pandas as pd
 
@@ -65,43 +64,6 @@ def _has_payload(rec: Dict[str, Any]) -> bool:
     return False
 
 
-@lru_cache(maxsize=8192)
-def _cached_list_filing_files(cik: str, accession: str) -> pd.DataFrame:
-    try:
-        return list_filing_files(cik, accession)
-    except Exception:
-        return pd.DataFrame()
-
-
-def _recent_accession_whitelist(cik: str, subset_filings: pd.DataFrame, recent_hours: int) -> Set[str]:
-    """
-    If acceptance/filing timestamps don’t show activity in the last N hours,
-    fall back to index.json last_modified to detect touched accessions.
-    """
-    cutoff = pd.Timestamp.utcnow().tz_convert(None) - pd.Timedelta(hours=recent_hours)
-    allow: Set[str] = set()
-
-    adt = pd.to_datetime(subset_filings.get("acceptanceDateTime"), errors="coerce", utc=True).dt.tz_convert(None)
-    fdt = pd.to_datetime(subset_filings.get("filingDate"), errors="coerce")
-    mask = (adt >= cutoff) | (fdt >= cutoff)
-    allow.update(subset_filings.loc[mask, "accessionNumber"].dropna().astype(str))
-
-    if allow:
-        return allow
-
-    # Rare fallback: check last_modified in index.json
-    for _, r in subset_filings.iterrows():
-        acc = r.get("accessionNumber")
-        if not acc:
-            continue
-        files = _cached_list_filing_files(cik, acc)
-        if not files.empty and "last_modified" in files.columns:
-            lm = pd.to_datetime(files["last_modified"], errors="coerce")
-            if (lm >= cutoff).any():
-                allow.add(acc)
-    return allow
-
-
 def build_for_ticker(
     ticker: str,
     year: int,
@@ -137,7 +99,6 @@ def build_for_ticker(
         )
 
     # ---- filter by time window (24h default) ----
-    subset_base = filings[filings["form"].apply(_form_matches)].copy()
     if recent_hours and recent_hours > 0:
         cutoff = pd.Timestamp.utcnow().tz_convert(None) - pd.Timedelta(hours=recent_hours)
 
@@ -151,15 +112,6 @@ def build_for_ticker(
 
         subset = filings[mask_time & filings["form"].apply(_form_matches)].copy()
         subset = subset.sort_values(["filingDate", "acceptanceDateTime"], na_position="last").tail(limit)
-
-        # Fallback: recent by index.json if empty
-        if subset.empty:
-            tail = subset_base.sort_values(["filingDate", "acceptanceDateTime"], na_position="last").tail(limit)
-            wl = _recent_accession_whitelist(cik, tail, recent_hours)
-            if not wl:
-                print(f"[{ticker}] No allowed forms touched in last {recent_hours}h.")
-                return pd.DataFrame()
-            subset = tail[tail["accessionNumber"].isin(wl)].copy()
     else:
         # Year filter when not using recent-hours
         if year_by == "accession":

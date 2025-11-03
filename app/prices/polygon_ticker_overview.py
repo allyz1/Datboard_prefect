@@ -240,6 +240,12 @@ def upload_polygon_ticker_overview_df(df: pd.DataFrame, table: str = "Polygon_ou
         )
         
         logger.info(f"Upload completed: {stats}")
+        
+        # Log any errors that occurred
+        if stats.get("errors"):
+            for error in stats["errors"]:
+                logger.error(f"Upload error: {error}")
+        
         return stats
         
     except Exception as e:

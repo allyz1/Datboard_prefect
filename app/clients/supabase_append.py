@@ -1398,8 +1398,13 @@ def insert_polygon_outstanding_raw_df(
     for i in range(0, len(clean_records), chunk_size):
         chunk = clean_records[i:i + chunk_size]
         try:
-            result = sb.table(table).upsert(chunk, on_conflict="query_date,ticker").execute()
-            total_sent += len(chunk)
+            result = sb.table(table).upsert(chunk, on_conflict="query_date,ticker", returning="minimal").execute()
+            # Count actual rows returned from the upsert
+            if result.data is not None:
+                total_sent += len(result.data)
+            else:
+                # If no data returned, count the chunk as sent (upsert succeeded)
+                total_sent += len(chunk)
         except Exception as e:
             errors.append(f"Chunk {i//chunk_size + 1}: {str(e)}")
     

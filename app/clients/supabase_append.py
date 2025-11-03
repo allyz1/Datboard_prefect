@@ -183,6 +183,118 @@ def concat_and_upload(
     return upload_df_by_key(
         table, df, chunk_size=chunk_size, do_update=do_update, precheck=True
     )
+
+# ===== Holdings_raw specific helpers (with source column and composite key) =====
+def _prep_holdings_raw_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Prepare DataFrame specifically for Holdings_raw table with source column and composite key."""
+    _require_cols(df, ["date", "ticker", "asset", "total_holdings"])
+    out = df.copy()
+    out["date"] = pd.to_datetime(out["date"], errors="coerce").dt.date.astype("string")
+    out["ticker"] = out["ticker"].astype(str).str.upper()
+    out["asset"] = out["asset"].astype(str).str.upper()
+    out["total_holdings"] = pd.to_numeric(out["total_holdings"], errors="coerce")
+    # Add source column if missing (nullable)
+    if "source" not in out.columns:
+        out["source"] = None
+    out = out.dropna(subset=["date", "ticker"])
+    out = out.sort_values(["ticker", "date", "asset"])
+    return out[["date", "ticker", "asset", "total_holdings", "source"]]
+
+def _compute_holdings_raw_keys(df: pd.DataFrame) -> List[tuple]:
+    """Generate composite keys as (date, ticker, asset) tuples for Holdings_raw."""
+    return list(zip(df["date"], df["ticker"], df["asset"]))
+
+def _fetch_existing_holdings_raw_keys(sb: Client, table: str, keys: List[tuple], chunk: int = 100) -> set:
+    """Fetch existing composite keys from Holdings_raw database."""
+    existing = set()
+    for i in range(0, len(keys), chunk):
+        batch = keys[i:i + chunk]
+        for date, ticker, asset in batch:
+            try:
+                resp = sb.table(table).select("date,ticker,asset").eq("date", date).eq("ticker", ticker).eq("asset", asset).limit(1).execute()
+                for row in (resp.data or []):
+                    key_tuple = (row.get("date"), row.get("ticker"), row.get("asset"))
+                    if all(k is not None for k in key_tuple):
+                        existing.add(key_tuple)
+            except Exception:
+                continue
+    return existing
+
+def upload_holdings_raw_df(
+    table: str,
+    df: pd.DataFrame,
+    chunk_size: int = 1000,
+    do_update: bool = False,
+    precheck: bool = False,
+) -> Dict[str, int]:
+    """Upload DataFrame to Holdings_raw table with composite key (date, ticker, asset)."""
+    if df is None or df.empty:
+        return {"attempted": 0, "skipped_existing": 0, "sent": 0}
+
+    sb = get_supabase()
+    df2 = _prep_holdings_raw_df(df)
+    df2 = df2.drop_duplicates(subset=["date", "ticker", "asset"], keep="last")
+    attempted = len(df2)
+    skipped_existing = 0
+
+    if precheck:
+        keys_local = _compute_holdings_raw_keys(df2)
+        existing = _fetch_existing_holdings_raw_keys(sb, table, keys_local)
+        mask_missing = pd.Series(keys_local).apply(lambda k: k not in existing).values
+        df2 = df2.loc[mask_missing]
+        skipped_existing = attempted - len(df2)
+
+    if df2.empty:
+        return {"attempted": attempted, "skipped_existing": skipped_existing, "sent": 0}
+
+    payload = df2.where(pd.notnull(df2), None).to_dict(orient="records")
+
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i + chunk_size]
+        sb.table(table).upsert(
+            batch,
+            on_conflict="date,ticker,asset",
+            ignore_duplicates=(not do_update),
+            returning="minimal",
+        ).execute()
+        sent += len(batch)
+
+    return {"attempted": attempted, "skipped_existing": skipped_existing, "sent": sent}
+
+def concat_and_upload_holdings_raw(
+    table: str,
+    frames: List[pd.DataFrame],
+    chunk_size: int = 1000,
+    do_update: bool = False
+) -> Dict[str, int]:
+    """Concat and upload specifically for Holdings_raw table with source column and composite key."""
+    frames = [f for f in frames if isinstance(f, pd.DataFrame) and not f.empty]
+    if not frames:
+        return {"attempted": 0, "skipped_existing": 0, "sent": 0}
+
+    df = pd.concat(frames, ignore_index=True, sort=False, copy=False)
+
+    wanted = ["date", "ticker", "asset", "total_holdings", "source"]
+    for col in wanted:
+        if col not in df.columns:
+            if col == "source":
+                df[col] = None
+            else:
+                df[col] = pd.NA
+    df = df[wanted]
+    df = df.dropna(how="all")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date.astype("string")
+    df["ticker"] = df["ticker"].astype(str).str.upper()
+    df["asset"] = df["asset"].astype(str).str.upper()
+    df["total_holdings"] = pd.to_numeric(df["total_holdings"], errors="coerce")
+    df = df.dropna(subset=["date", "ticker"])
+    df = df.drop_duplicates(subset=["date", "ticker", "asset"], keep="last")
+
+    return upload_holdings_raw_df(
+        table, df, chunk_size=chunk_size, do_update=do_update, precheck=True
+    )
+
 # ===== ATM_raw upload helpers (ADD THIS SECTION) =====
 
 # Columns coming from your ATM timeline df:

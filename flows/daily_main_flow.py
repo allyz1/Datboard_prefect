@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta, date
 import os
 
 from app import config  # loads .env locally; in prod set real env vars
-from app.clients.supabase_append import concat_and_upload
+from app.clients.supabase_append import concat_and_upload, concat_and_upload_holdings_raw
 from app.clients.upload_coinbase import upload_coinbase_df
 from app.prices.coinbase import get_last_n_days_excluding_today  # date, product_id, ohlc, volume
 
@@ -652,7 +652,11 @@ def daily_main_pipeline(
 
     # 2) Collect & upload holdings
     frames = [f.result() for f in (f1, f2, f3, f4, f5, f6, f7, f8, f9)]
-    stats_holdings = concat_and_upload(table, frames, do_update=do_update)
+    # Use Holdings_raw specific function if table is Holdings_raw
+    if table == "Holdings_raw":
+        stats_holdings = concat_and_upload_holdings_raw(table, frames, do_update=do_update)
+    else:
+        stats_holdings = concat_and_upload(table, frames, do_update=do_update)
     logger.info(
         f"[Holdings -> {table}] attempted={stats_holdings['attempted']} "
         f"skipped={stats_holdings['skipped_existing']} sent={stats_holdings['sent']}"

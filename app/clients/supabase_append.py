@@ -1385,7 +1385,12 @@ def insert_polygon_outstanding_raw_df(
     for r in records:
         clean_r = {}
         for k, v in r.items():
-            clean_r[k] = _json_safe(v)
+            val = _json_safe(v)
+            # Convert whole floats to ints to avoid issues with bigint columns
+            if isinstance(val, float) and not math.isnan(val) and not math.isinf(val):
+                if val.is_integer():
+                    val = int(val)
+            clean_r[k] = val
         clean_records.append(clean_r)
     
     if not clean_records:

@@ -468,7 +468,7 @@ def prep_noncrypto_from_cash_df(
     - Dedupes to one row per (ticker, date) by taking the highest bs_score.
     """
     if cash_df is None or cash_df.empty:
-        return pd.DataFrame(columns=["date", "ticker", "asset", "total_holdings"])
+        return pd.DataFrame(columns=["date", "ticker", "asset", "total_holdings", "corrected"])
 
     df = cash_df.copy()
 
@@ -507,11 +507,12 @@ def prep_noncrypto_from_cash_df(
         "ticker": best["ticker"].astype(str).str.upper(),
         "asset": asset_label,
         "total_holdings": best["__value"].astype(float),
+        "corrected": False,  # boolean column, False by default
     })
 
     out = out.dropna(subset=["date", "ticker"])
     out = out.drop_duplicates(subset=["date", "ticker"], keep="last").reset_index(drop=True)
-    return out[["date", "ticker", "asset", "total_holdings"]]
+    return out[["date", "ticker", "asset", "total_holdings", "corrected"]]
 
 def upload_noncrypto_from_cash(
     cash_df: pd.DataFrame,
@@ -524,7 +525,7 @@ def upload_noncrypto_from_cash(
     """
     End-to-end helper:
       - transform cash extractor rows -> Noncrypto_holdings_raw schema
-      - upsert by key (date,ticker) via upload_df_by_key()
+      - upsert by key (date,ticker)
 
     Returns: {"attempted": int, "skipped_existing": int, "sent": int}
     """
@@ -533,13 +534,41 @@ def upload_noncrypto_from_cash(
         asset_label=NONCRYPTO_ASSET_LABEL,
         prefer_combined_if_missing=prefer_combined_if_missing,
     )
-    return upload_df_by_key(
-        table=table,
-        df=prepared,
-        chunk_size=chunk_size,
-        do_update=do_update,
-        precheck=precheck,
-    )
+    
+    # Upload Noncrypto_holdings_raw directly to handle corrected column
+    if prepared is None or prepared.empty:
+        return {"attempted": 0, "skipped_existing": 0, "sent": 0}
+    
+    sb = get_supabase()
+    df2 = prepared.copy()
+    df2 = df2.drop_duplicates(subset=["date", "ticker"], keep="last")
+    attempted = len(df2)
+    skipped_existing = 0
+    
+    if precheck:
+        keys_local = _compute_keys_local(df2).tolist()
+        existing = _fetch_existing_keys(sb, table, keys_local)
+        mask_missing = ~pd.Series(keys_local).isin(existing).values
+        df2 = df2.loc[mask_missing]
+        skipped_existing = attempted - len(df2)
+    
+    if df2.empty:
+        return {"attempted": attempted, "skipped_existing": skipped_existing, "sent": 0}
+    
+    payload = df2.where(pd.notnull(df2), None).to_dict(orient="records")
+    
+    sent = 0
+    for i in range(0, len(payload), chunk_size):
+        batch = payload[i:i + chunk_size]
+        sb.table(table).upsert(
+            batch,
+            on_conflict="key",
+            ignore_duplicates=(not do_update),
+            returning="minimal",
+        ).execute()
+        sent += len(batch)
+    
+    return {"attempted": attempted, "skipped_existing": skipped_existing, "sent": sent}
     
 # ===== Reg_direct_raw upload helpers (ADD THIS SECTION) =====
 REG_DIRECT_TABLE = "Reg_direct_raw"

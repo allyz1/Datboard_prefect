@@ -349,6 +349,7 @@ def get_dat_ticker_ranks(df_ranks: pd.DataFrame, dat_tickers: List[str]) -> pd.D
     """
     Extract ranking data for DAT tickers plus ranking neighbors (±1) around the DAT leader
     for each metric: dollar_volume, trading_volume, transactions, and change%.
+    For change%, when all DATs are negative, finds neighbors based on similar change% values.
     """
     if not dat_tickers or df_ranks.empty:
         return pd.DataFrame()
@@ -396,13 +397,53 @@ def get_dat_ticker_ranks(df_ranks: pd.DataFrame, dat_tickers: List[str]) -> pd.D
         neighbors.append(txn_neighbors)
 
     # Change% neighbors ±1
+    # Special handling: if all DATs are negative, find neighbors by similar change% values rather than just rank
     if dat_change_leader_rank is not None:
-        chg_neighbors = df_ranks[
-            (df_ranks["rank_change_perc"] >= dat_change_leader_rank - 1) &
-            (df_ranks["rank_change_perc"] <= dat_change_leader_rank + 1)
-        ].copy()
-        chg_neighbors["is_dat"] = chg_neighbors["ticker"].isin(dat_tickers)
-        neighbors.append(chg_neighbors)
+        # Get the DAT leader's change% value
+        dat_change_leader = dat_df.loc[dat_df["rank_change_perc"].idxmin()] if "rank_change_perc" in dat_df.columns else None
+        
+        if dat_change_leader is not None and "todays_change_perc" in dat_change_leader:
+            leader_change_pct = dat_change_leader["todays_change_perc"]
+            
+            # Check if all DATs have negative change%
+            all_dat_changes = dat_df["todays_change_perc"].dropna()
+            all_negative = len(all_dat_changes) > 0 and (all_dat_changes < 0).all()
+            
+            if all_negative and pd.notna(leader_change_pct):
+                # When all DATs are negative, find neighbors within ±0.5% change (similar performance)
+                # This ensures we get meaningful neighbors even when ranks are very high
+                change_threshold = 0.5  # ±0.5 percentage points
+                chg_neighbors = df_ranks[
+                    (df_ranks["todays_change_perc"].notna()) &
+                    (df_ranks["todays_change_perc"] >= leader_change_pct - change_threshold) &
+                    (df_ranks["todays_change_perc"] <= leader_change_pct + change_threshold)
+                ].copy()
+                
+                # Also include rank neighbors as fallback/backup
+                rank_neighbors = df_ranks[
+                    (df_ranks["rank_change_perc"] >= dat_change_leader_rank - 1) &
+                    (df_ranks["rank_change_perc"] <= dat_change_leader_rank + 1)
+                ].copy()
+                
+                # Combine both approaches and deduplicate
+                chg_neighbors = pd.concat([chg_neighbors, rank_neighbors]).drop_duplicates(subset=["ticker"])
+            else:
+                # Normal case: use rank neighbors
+                chg_neighbors = df_ranks[
+                    (df_ranks["rank_change_perc"] >= dat_change_leader_rank - 1) &
+                    (df_ranks["rank_change_perc"] <= dat_change_leader_rank + 1)
+                ].copy()
+            
+            chg_neighbors["is_dat"] = chg_neighbors["ticker"].isin(dat_tickers)
+            neighbors.append(chg_neighbors)
+        else:
+            # Fallback to rank neighbors if change% not available
+            chg_neighbors = df_ranks[
+                (df_ranks["rank_change_perc"] >= dat_change_leader_rank - 1) &
+                (df_ranks["rank_change_perc"] <= dat_change_leader_rank + 1)
+            ].copy()
+            chg_neighbors["is_dat"] = chg_neighbors["ticker"].isin(dat_tickers)
+            neighbors.append(chg_neighbors)
 
     if not neighbors:
         return dat_df.sort_values("ticker").reset_index(drop=True)

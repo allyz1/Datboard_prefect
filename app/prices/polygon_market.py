@@ -3,6 +3,7 @@
 Polygon.io Daily Market Summary scraper.
 
 Adds: Full Market Snapshot (only ticker, todaysChangePerc) -> ranks & neighbors
+Uses Yahoo Finance screener for most active stocks instead of Polygon volume data.
 """
 
 import requests
@@ -31,6 +32,46 @@ HEADERS = {
 # Polygon.io API endpoints
 POLYGON_MARKET_SUMMARY_URL = "https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks"
 POLYGON_SNAPSHOT_URL = "https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers"  # NEW
+
+# Yahoo Finance screener for most active stocks
+def get_yahoo_most_active_stocks(min_volume=0, count=250, offset=0):
+    """
+    Fetch Yahoo Finance screener results (most active stocks).
+    Returns DataFrame with columns: Ticker, Name, Price, Volume, MarketCap
+    """
+    url = "https://query2.finance.yahoo.com/v1/finance/screener/predefined/saved"
+    params = {
+        "count": count,
+        "offset": offset,
+        "scrIds": "most_actives"
+    }
+
+    r = requests.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+
+    # Navigate to the quotes list
+    try:
+        quotes = data["finance"]["result"][0]["quotes"]
+    except (KeyError, IndexError):
+        raise ValueError("Unexpected JSON structure from Yahoo. Check endpoint response.")
+
+    # Build DataFrame
+    df = pd.DataFrame(quotes)
+    df = df[["symbol", "shortName", "regularMarketPrice", "regularMarketVolume", "marketCap"]]
+    df.rename(columns={
+        "symbol": "Ticker",
+        "shortName": "Name",
+        "regularMarketPrice": "Price",
+        "regularMarketVolume": "Volume",
+        "marketCap": "MarketCap"
+    }, inplace=True)
+
+    # Filter and sort
+    df = df[df["Volume"] > min_volume]
+    df = df.sort_values("Volume", ascending=False).reset_index(drop=True)
+
+    return df
 
 def get_with_retry(url: str, params: Dict, max_retries: int = 3, backoff: float = 1.5, headers=None) -> Optional[requests.Response]:
     """
@@ -193,22 +234,62 @@ def get_polygon_ticker_details(api_key: str, ticker: str) -> dict:
         return {}
 
 # ---------------------- DAT Ticker Configuration ----------------------
-DEFAULT_DAT_TICKERS = ["MSTR","CEP","SMLR","NAKA","BMNR","SBET","ETHZ","BTCS","SQNS","BTBT","DFDV","UPXI","HSDT","FORD"]
+DEFAULT_DAT_TICKERS = [
+    "MSTR","CEP","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV","UPXI","HSDT","FORD",
+    "ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR","GME","EMPD","CORZ","FLD","USBC","LMFA",
+    "DEFT","GNS","BTCM","ICG","COSM","KIDZ"
+]
 
 # ---------------------- Ranking Functions ----------------------
 def add_volume_ranks(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Ranks by dollar volume and transactions (1 = highest).
+    Ranks by dollar volume and volume rank (1 = highest).
+    Works with Yahoo Finance data (Ticker, Price, Volume, MarketCap) or Polygon data (ticker, close, volume).
     """
     if df.empty:
         return df
     df = df.copy()
+    
+    # Handle both Yahoo Finance (uppercase) and Polygon (lowercase) column names
+    if "Ticker" in df.columns:
+        df["ticker"] = df["Ticker"].astype(str).str.upper()
+    if "Price" in df.columns:
+        df["close"] = pd.to_numeric(df["Price"], errors="coerce")
+    if "Volume" in df.columns:
+        df["volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+    if "MarketCap" in df.columns:
+        df["market_cap"] = pd.to_numeric(df["MarketCap"], errors="coerce")
+    
+    # Ensure required columns exist
+    if "volume" not in df.columns:
+        df["volume"] = 0
+    if "close" not in df.columns:
+        df["close"] = 0.0
+    if "transactions" not in df.columns:
+        df["transactions"] = 0  # Yahoo Finance doesn't provide transactions
+    
+    # Normalize numeric columns
     df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0)
     df["close"] = pd.to_numeric(df["close"], errors="coerce").fillna(0.0)
     df["transactions"] = pd.to_numeric(df["transactions"], errors="coerce").fillna(0)
+    
+    # Calculate dollar volume
     df["dollar_volume"] = df["close"] * df["volume"]
+    
+    # Add date if missing (use today for Yahoo Finance data)
+    if "date" not in df.columns:
+        df["date"] = datetime.now(timezone.utc).date().isoformat()
+    
+    # Rank by dollar volume and volume (1 = highest)
     df["rank_dollar_volume"] = df["dollar_volume"].rank(method="min", ascending=False).astype(int)
-    df["rank_transactions"] = df["transactions"].rank(method="min", ascending=False).astype(int)
+    df["rank_trading_volume"] = df["volume"].rank(method="min", ascending=False).astype(int)
+    
+    # Rank transactions if available (from Polygon)
+    if "transactions" in df.columns and df["transactions"].notna().any() and df["transactions"].sum() > 0:
+        df["rank_transactions"] = df["transactions"].rank(method="min", ascending=False).astype(int)
+    else:
+        df["rank_transactions"] = None
+    
     df["universe_size"] = len(df)
     return df
 
@@ -267,7 +348,7 @@ def add_change_ranks(df_change: pd.DataFrame) -> pd.DataFrame:
 def get_dat_ticker_ranks(df_ranks: pd.DataFrame, dat_tickers: List[str]) -> pd.DataFrame:
     """
     Extract ranking data for DAT tickers plus ranking neighbors (±1) around the DAT leader
-    for each metric: dollar_volume, transactions, and (NEW) change%.
+    for each metric: dollar_volume, trading_volume, transactions, and change%.
     """
     if not dat_tickers or df_ranks.empty:
         return pd.DataFrame()
@@ -280,9 +361,10 @@ def get_dat_ticker_ranks(df_ranks: pd.DataFrame, dat_tickers: List[str]) -> pd.D
     dat_df["is_dat"] = True
 
     # Leaders (best ranks) in each metric
-    dat_dollar_leader_rank = dat_df["rank_dollar_volume"].min() if "rank_dollar_volume" in dat_df else None
-    dat_txn_leader_rank = dat_df["rank_transactions"].min() if "rank_transactions" in dat_df else None
-    dat_change_leader_rank = dat_df["rank_change_perc"].min() if "rank_change_perc" in dat_df else None
+    dat_dollar_leader_rank = dat_df["rank_dollar_volume"].min() if "rank_dollar_volume" in dat_df.columns and not dat_df["rank_dollar_volume"].isna().all() else None
+    dat_vol_leader_rank = dat_df["rank_trading_volume"].min() if "rank_trading_volume" in dat_df.columns and not dat_df["rank_trading_volume"].isna().all() else None
+    dat_txn_leader_rank = dat_df["rank_transactions"].min() if "rank_transactions" in dat_df.columns and not dat_df["rank_transactions"].isna().all() else None
+    dat_change_leader_rank = dat_df["rank_change_perc"].min() if "rank_change_perc" in dat_df.columns and not dat_df["rank_change_perc"].isna().all() else None
 
     neighbors = []
 
@@ -295,6 +377,15 @@ def get_dat_ticker_ranks(df_ranks: pd.DataFrame, dat_tickers: List[str]) -> pd.D
         dollar_neighbors["is_dat"] = dollar_neighbors["ticker"].isin(dat_tickers)
         neighbors.append(dollar_neighbors)
 
+    # Trading volume neighbors ±1 (NEW - from Yahoo Finance)
+    if dat_vol_leader_rank is not None:
+        vol_neighbors = df_ranks[
+            (df_ranks["rank_trading_volume"] >= dat_vol_leader_rank - 1) &
+            (df_ranks["rank_trading_volume"] <= dat_vol_leader_rank + 1)
+        ].copy()
+        vol_neighbors["is_dat"] = vol_neighbors["ticker"].isin(dat_tickers)
+        neighbors.append(vol_neighbors)
+
     # Transactions neighbors ±1
     if dat_txn_leader_rank is not None:
         txn_neighbors = df_ranks[
@@ -304,7 +395,7 @@ def get_dat_ticker_ranks(df_ranks: pd.DataFrame, dat_tickers: List[str]) -> pd.D
         txn_neighbors["is_dat"] = txn_neighbors["ticker"].isin(dat_tickers)
         neighbors.append(txn_neighbors)
 
-    # NEW: Change% neighbors ±1
+    # Change% neighbors ±1
     if dat_change_leader_rank is not None:
         chg_neighbors = df_ranks[
             (df_ranks["rank_change_perc"] >= dat_change_leader_rank - 1) &
@@ -348,20 +439,48 @@ def get_market_volume_ranks(
     adjusted: bool = True
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Get market-wide ranks (dollar_volume, transactions) and DAT subset.
-    Then augment with today's % change ranks from snapshot.
+    Get market-wide ranks using:
+    - Yahoo Finance: volume data (most active stocks)
+    - Polygon: transaction data and percent change data
     """
-    print(f"Fetching market data for {target_date}...")
-    df = get_polygon_market_summary_for_date(target_date, api_key)
-    if df.empty:
-        print("No market data retrieved.")
+    print(f"Fetching most active stocks from Yahoo Finance...")
+    df_yahoo = get_yahoo_most_active_stocks(min_volume=0)  # Get all stocks, no volume filter
+    
+    if df_yahoo.empty:
+        print("No stocks retrieved from Yahoo Finance.")
         return pd.DataFrame(), pd.DataFrame()
 
-    print(f"Retrieved {len(df)} stocks, computing ranks...")
-    df_ranks = add_volume_ranks(df)
+    print(f"Retrieved {len(df_yahoo)} stocks from Yahoo Finance")
+    
+    # Get transaction data from Polygon for the same tickers
+    print(f"Fetching transaction data from Polygon for {target_date}...")
+    ticker_list = df_yahoo["Ticker"].tolist()
+    df_polygon = get_polygon_market_summary_for_date(target_date, api_key)
+    
+    # Merge Polygon transaction data with Yahoo Finance volume data
+    if not df_polygon.empty:
+        # Keep only tickers that are in Yahoo Finance results
+        df_polygon_filtered = df_polygon[df_polygon["ticker"].isin([t.upper() for t in ticker_list])].copy()
+        
+        # Merge transactions from Polygon
+        df_yahoo["ticker"] = df_yahoo["Ticker"].str.upper()
+        df_merged = df_yahoo.merge(
+            df_polygon_filtered[["ticker", "transactions"]],
+            on="ticker",
+            how="left"
+        )
+        print(f"  Merged transaction data for {df_merged['transactions'].notna().sum()} tickers from Polygon")
+    else:
+        print("  Warning: No Polygon transaction data available")
+        df_merged = df_yahoo.copy()
+        df_merged["ticker"] = df_merged["Ticker"].str.upper()
+        df_merged["transactions"] = None
 
-    # NEW: fetch change% (only ticker + todaysChangePerc) and merge ranks
-    print("Fetching snapshot change% (todaysChangePerc) …")
+    print("Computing ranks...")
+    df_ranks = add_volume_ranks(df_merged)
+
+    # Fetch change% (only ticker + todaysChangePerc) from Polygon snapshot and merge ranks
+    print("Fetching snapshot change% (todaysChangePerc) from Polygon...")
     df_change = fetch_snapshot_change_perc(api_key, include_otc=include_otc, tickers=None)
     if not df_change.empty:
         df_change_ranked = add_change_ranks(df_change)[["ticker", "todays_change_perc", "rank_change_perc"]]

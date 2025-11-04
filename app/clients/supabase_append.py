@@ -419,134 +419,135 @@ def upsert_atm_raw_df(
 # ===== Noncrypto_holdings_raw (from SEC cash extractor) =====
 
 NONCRYPTO_TABLE = "Noncrypto_holdings_raw"
-NONCRYPTO_ASSET_LABEL = "CASH_LIKE"
 
-def _nc_choose_asof_date(row: pd.Series) -> Optional[pd.Timestamp]:
-    """
-    Prefer the balance-sheet value column date, else reportDate, else filingDate.
-    Returns a *date* (no time).
-    """
-    for col in ("bs_value_column_date", "reportDate", "filingDate"):
-        val = pd.to_datetime(row.get(col), errors="coerce", utc=False)
-        if pd.notna(val):
-            return val.date()
-    return None
+# Expected columns matching the Noncrypto_holdings_raw table schema
+NONCRYPTO_REQUIRED_COLS = [
+    "ticker",
+    "form",
+    "accessionNumber",
+    "reportDate",
+    "source_url",
+]
 
-def _nc_pick_cash_value(row: pd.Series, prefer_combined_if_missing: bool = False) -> Optional[float]:
-    """
-    Primary: cash_like_total_excl_restricted_usd
-    Fallback A: cash_and_cash_equivalents_usd
-    Optional Fallback B: combined_cash_cash_eq_restricted_usd (if prefer_combined_if_missing=True)
-    """
-    candidates = [
-        "cash_like_total_excl_restricted_usd",
-        "cash_and_cash_equivalents_usd",
-    ]
-    if prefer_combined_if_missing:
-        candidates.append("combined_cash_cash_eq_restricted_usd")
-
-    for col in candidates:
-        v = row.get(col)
-        try:
-            if v is not None and pd.notna(v):
-                return float(v)
-        except Exception:
-            continue
-    return None
+NONCRYPTO_ALL_COLS = [
+    "ticker",
+    "form",
+    "accessionNumber",
+    "filingDate",
+    "reportDate",
+    "source_url",
+    "cash_and_cash_equivalents_usd",
+    "marketable_securities_usd",
+    "short_term_investments_usd",
+    "us_treasuries_usd",
+    "government_securities_usd",
+    "restricted_cash_usd",
+    "stablecoins_usd",
+    "combined_cash_cash_eq_restricted_usd",
+    "cash_like_total_excl_restricted_usd",
+    "units_multiplier",
+    "corrected",
+]
 
 def prep_noncrypto_from_cash_df(
     cash_df: pd.DataFrame,
-    asset_label: str = NONCRYPTO_ASSET_LABEL,
-    prefer_combined_if_missing: bool = False,
 ) -> pd.DataFrame:
     """
-    Transform the SEC cash extractor output into the schema required by
-    Noncrypto_holdings_raw: (date, ticker, asset, total_holdings).
-
-    - Chooses an 'as of' date per row (bs_value_column_date > reportDate > filingDate).
-    - Picks the best cash metric (see _nc_pick_cash_value).
-    - Dedupes to one row per (ticker, date) by taking the highest bs_score.
+    Prepare the SEC cash extractor output for insertion into Noncrypto_holdings_raw table.
+    Matches the actual table schema with all cash-related columns.
+    
+    Required columns: ticker, form, accessionNumber, reportDate, source_url
     """
     if cash_df is None or cash_df.empty:
-        return pd.DataFrame(columns=["date", "ticker", "asset", "total_holdings", "corrected"])
+        return pd.DataFrame(columns=NONCRYPTO_ALL_COLS)
 
     df = cash_df.copy()
 
+    # Ensure all expected columns exist (fill missing with NA)
+    for col in NONCRYPTO_ALL_COLS:
+        if col not in df.columns:
+            if col == "corrected":
+                df[col] = False  # default to False for boolean
+            else:
+                df[col] = pd.NA
+
+    # Select only the columns we want to upload
+    df = df[NONCRYPTO_ALL_COLS].copy()
+
+    # Normalize required columns
+    df["ticker"] = df["ticker"].astype(str).str.upper()
+    df["form"] = df["form"].astype(str).str.upper()
+    df["accessionNumber"] = df["accessionNumber"].astype(str)
+    df["source_url"] = df["source_url"].astype(str)
+
+    # Normalize date columns
+    df["filingDate"] = pd.to_datetime(df["filingDate"], errors="coerce").dt.date.astype("string")
+    df["reportDate"] = pd.to_datetime(df["reportDate"], errors="coerce").dt.date.astype("string")
+
     # Normalize numeric fields
-    for col in (
-        "cash_like_total_excl_restricted_usd",
+    numeric_cols = [
         "cash_and_cash_equivalents_usd",
+        "marketable_securities_usd",
+        "short_term_investments_usd",
+        "us_treasuries_usd",
+        "government_securities_usd",
+        "restricted_cash_usd",
+        "stablecoins_usd",
         "combined_cash_cash_eq_restricted_usd",
-        "bs_score",
-    ):
+        "cash_like_total_excl_restricted_usd",
+        "units_multiplier",
+    ]
+    for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-        else:
-            if col == "bs_score":
-                df[col] = 0.0  # default when absent
 
-    # Derive as-of date + value
-    df["__asof_date"] = df.apply(_nc_choose_asof_date, axis=1)
-    df["__value"] = df.apply(
-        lambda r: _nc_pick_cash_value(r, prefer_combined_if_missing=prefer_combined_if_missing),
-        axis=1,
-    )
+    # Normalize boolean column
+    if "corrected" in df.columns:
+        df["corrected"] = df["corrected"].astype(bool)
 
-    # Keep valid rows
-    df = df.dropna(subset=["ticker", "__asof_date", "__value"]).copy()
+    # Drop rows missing critical identifiers (required columns)
+    df = df.dropna(subset=NONCRYPTO_REQUIRED_COLS, how="any")
 
-    # Choose best row per (ticker, date) by highest bs_score
-    df["__rank"] = (
-        df.groupby(["ticker", "__asof_date"])["bs_score"]
-          .rank(method="first", ascending=False)
-    )
-    best = df[df["__rank"] == 1.0].copy()
+    # Remove any helper columns that might have been added
+    df = df[[c for c in NONCRYPTO_ALL_COLS if c in df.columns]]
 
-    out = pd.DataFrame({
-        "date": pd.to_datetime(best["__asof_date"], errors="coerce").dt.date.astype("string"),
-        "ticker": best["ticker"].astype(str).str.upper(),
-        "asset": asset_label,
-        "total_holdings": best["__value"].astype(float),
-        "corrected": False,  # boolean column, False by default
-    })
+    return df
 
-    out = out.dropna(subset=["date", "ticker"])
-    out = out.drop_duplicates(subset=["date", "ticker"], keep="last").reset_index(drop=True)
-    return out[["date", "ticker", "asset", "total_holdings", "corrected"]]
+def _compute_noncrypto_keys(df: pd.DataFrame) -> pd.Series:
+    """Compute keys for Noncrypto_holdings_raw table based on reportDate and ticker."""
+    # reportDate is already a string in YYYY-MM-DD format from prep_noncrypto_from_cash_df
+    d8 = df["reportDate"].str.replace("-", "", regex=False)
+    return d8 + "-" + df["ticker"]  # matches DB's GENERATED key: YYYYMMDD-ticker
 
 def upload_noncrypto_from_cash(
     cash_df: pd.DataFrame,
     table: str = NONCRYPTO_TABLE,
     chunk_size: int = 1000,
     do_update: bool = False,
-    prefer_combined_if_missing: bool = False,
     precheck: bool = True,
 ) -> Dict[str, int]:
     """
     End-to-end helper:
-      - transform cash extractor rows -> Noncrypto_holdings_raw schema
-      - upsert by key (date,ticker)
+      - prepare cash extractor rows -> Noncrypto_holdings_raw schema
+      - upsert by key (reportDate,ticker) - key is generated by DB
 
     Returns: {"attempted": int, "skipped_existing": int, "sent": int}
     """
-    prepared = prep_noncrypto_from_cash_df(
-        cash_df,
-        asset_label=NONCRYPTO_ASSET_LABEL,
-        prefer_combined_if_missing=prefer_combined_if_missing,
-    )
+    prepared = prep_noncrypto_from_cash_df(cash_df)
     
-    # Upload Noncrypto_holdings_raw directly to handle corrected column
     if prepared is None or prepared.empty:
         return {"attempted": 0, "skipped_existing": 0, "sent": 0}
     
     sb = get_supabase()
     df2 = prepared.copy()
-    df2 = df2.drop_duplicates(subset=["date", "ticker"], keep="last")
+    
+    # Deduplicate by (ticker, reportDate, accessionNumber) to keep most recent per filing
+    df2 = df2.drop_duplicates(subset=["ticker", "reportDate", "accessionNumber"], keep="last")
     attempted = len(df2)
     skipped_existing = 0
     
     if precheck:
-        keys_local = _compute_keys_local(df2).tolist()
+        keys_local = _compute_noncrypto_keys(df2).tolist()
         existing = _fetch_existing_keys(sb, table, keys_local)
         mask_missing = ~pd.Series(keys_local).isin(existing).values
         df2 = df2.loc[mask_missing]

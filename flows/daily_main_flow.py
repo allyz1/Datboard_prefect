@@ -516,7 +516,6 @@ def t_sec_cash_noncrypto(
         cash_df,
         table="Noncrypto_holdings_raw",
         do_update=do_update,
-        prefer_combined_if_missing=prefer_combined_if_missing,
         precheck=True,
     )
     logger.info(f"[Noncrypto_holdings_raw] attempted={stats['attempted']} "
@@ -721,7 +720,6 @@ def daily_main_pipeline(
         year_by="accession",
         limit_filings=300,
         max_docs_per_filing=12,
-        prefer_combined_if_missing=False,
         do_update=False,
     ).result()
     

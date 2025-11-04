@@ -436,7 +436,7 @@ NONCRYPTO_ALL_COLS = [
     "filingDate",
     "reportDate",
     "source_url",
-    "cash_and_cash_equivalents_usd",
+        "cash_and_cash_equivalents_usd",
     "marketable_securities_usd",
     "short_term_investments_usd",
     "us_treasuries_usd",
@@ -455,7 +455,7 @@ def prep_noncrypto_from_cash_df(
     """
     Prepare the SEC cash extractor output for insertion into Noncrypto_holdings_raw table.
     Matches the actual table schema with all cash-related columns.
-    
+
     Required columns: ticker, form, accessionNumber, reportDate, source_url
     """
     if cash_df is None or cash_df.empty:

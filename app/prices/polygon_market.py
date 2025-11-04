@@ -397,53 +397,13 @@ def get_dat_ticker_ranks(df_ranks: pd.DataFrame, dat_tickers: List[str]) -> pd.D
         neighbors.append(txn_neighbors)
 
     # Change% neighbors ±1
-    # Special handling: if all DATs are negative, find neighbors by similar change% values rather than just rank
     if dat_change_leader_rank is not None:
-        # Get the DAT leader's change% value
-        dat_change_leader = dat_df.loc[dat_df["rank_change_perc"].idxmin()] if "rank_change_perc" in dat_df.columns else None
-        
-        if dat_change_leader is not None and "todays_change_perc" in dat_change_leader:
-            leader_change_pct = dat_change_leader["todays_change_perc"]
-            
-            # Check if all DATs have negative change%
-            all_dat_changes = dat_df["todays_change_perc"].dropna()
-            all_negative = len(all_dat_changes) > 0 and (all_dat_changes < 0).all()
-            
-            if all_negative and pd.notna(leader_change_pct):
-                # When all DATs are negative, find neighbors within ±0.5% change (similar performance)
-                # This ensures we get meaningful neighbors even when ranks are very high
-                change_threshold = 0.5  # ±0.5 percentage points
-                chg_neighbors = df_ranks[
-                    (df_ranks["todays_change_perc"].notna()) &
-                    (df_ranks["todays_change_perc"] >= leader_change_pct - change_threshold) &
-                    (df_ranks["todays_change_perc"] <= leader_change_pct + change_threshold)
-                ].copy()
-                
-                # Also include rank neighbors as fallback/backup
-                rank_neighbors = df_ranks[
-                    (df_ranks["rank_change_perc"] >= dat_change_leader_rank - 1) &
-                    (df_ranks["rank_change_perc"] <= dat_change_leader_rank + 1)
-                ].copy()
-                
-                # Combine both approaches and deduplicate
-                chg_neighbors = pd.concat([chg_neighbors, rank_neighbors]).drop_duplicates(subset=["ticker"])
-            else:
-                # Normal case: use rank neighbors
-                chg_neighbors = df_ranks[
-                    (df_ranks["rank_change_perc"] >= dat_change_leader_rank - 1) &
-                    (df_ranks["rank_change_perc"] <= dat_change_leader_rank + 1)
-                ].copy()
-            
-            chg_neighbors["is_dat"] = chg_neighbors["ticker"].isin(dat_tickers)
-            neighbors.append(chg_neighbors)
-        else:
-            # Fallback to rank neighbors if change% not available
-            chg_neighbors = df_ranks[
-                (df_ranks["rank_change_perc"] >= dat_change_leader_rank - 1) &
-                (df_ranks["rank_change_perc"] <= dat_change_leader_rank + 1)
-            ].copy()
-            chg_neighbors["is_dat"] = chg_neighbors["ticker"].isin(dat_tickers)
-            neighbors.append(chg_neighbors)
+        chg_neighbors = df_ranks[
+            (df_ranks["rank_change_perc"] >= dat_change_leader_rank - 1) &
+            (df_ranks["rank_change_perc"] <= dat_change_leader_rank + 1)
+        ].copy()
+        chg_neighbors["is_dat"] = chg_neighbors["ticker"].isin(dat_tickers)
+        neighbors.append(chg_neighbors)
 
     if not neighbors:
         return dat_df.sort_values("ticker").reset_index(drop=True)
@@ -481,53 +441,54 @@ def get_market_volume_ranks(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Get market-wide ranks using:
-    - Yahoo Finance: volume data (most active stocks)
-    - Polygon: transaction data and percent change data
+    - Yahoo Finance: volume data (most active stocks) - ONLY for volume rankings
+    - Polygon: transaction data, percent change data, and ALL tickers
     """
-    print(f"Fetching most active stocks from Yahoo Finance...")
-    df_yahoo = get_yahoo_most_active_stocks(min_volume=0)  # Get all stocks, no volume filter
-    
-    if df_yahoo.empty:
-        print("No stocks retrieved from Yahoo Finance.")
-        return pd.DataFrame(), pd.DataFrame()
-
-    print(f"Retrieved {len(df_yahoo)} stocks from Yahoo Finance")
-    
-    # Get transaction data from Polygon for the same tickers
+    # Get ALL transaction and change% data from Polygon first
     print(f"Fetching transaction data from Polygon for {target_date}...")
-    ticker_list = df_yahoo["Ticker"].tolist()
     df_polygon = get_polygon_market_summary_for_date(target_date, api_key)
     
-    # Merge Polygon transaction data with Yahoo Finance volume data
-    if not df_polygon.empty:
-        # Keep only tickers that are in Yahoo Finance results
-        df_polygon_filtered = df_polygon[df_polygon["ticker"].isin([t.upper() for t in ticker_list])].copy()
-        
-        # Merge transactions from Polygon
+    if df_polygon.empty:
+        print("No Polygon transaction data available.")
+        return pd.DataFrame(), pd.DataFrame()
+    
+    print(f"Retrieved {len(df_polygon)} stock records from Polygon")
+    
+    # Fetch change% (only ticker + todaysChangePerc) from Polygon snapshot for ALL tickers
+    print("Fetching snapshot change% (todaysChangePerc) from Polygon...")
+    df_change = fetch_snapshot_change_perc(api_key, include_otc=include_otc, tickers=None)
+    
+    # Merge change% into Polygon data
+    if not df_change.empty:
+        df_change_ranked = add_change_ranks(df_change)[["ticker", "todays_change_perc", "rank_change_perc"]]
+        df_polygon = df_polygon.merge(df_change_ranked, on="ticker", how="left")
+        print(f"  Merged change% data for {df_polygon['rank_change_perc'].notna().sum()} tickers")
+    else:
+        print("Snapshot change% unavailable; continuing without change% ranks.")
+    
+    # Get volume data from Yahoo Finance (most active stocks)
+    print(f"Fetching volume data from Yahoo Finance (most active stocks)...")
+    df_yahoo = get_yahoo_most_active_stocks(min_volume=0)
+    
+    if not df_yahoo.empty:
+        # Merge Yahoo Finance volume data into Polygon data
         df_yahoo["ticker"] = df_yahoo["Ticker"].str.upper()
-        df_merged = df_yahoo.merge(
-            df_polygon_filtered[["ticker", "transactions"]],
+        # Merge volume, price, and market cap from Yahoo Finance
+        yahoo_cols = ["ticker", "Volume", "Price", "MarketCap"]
+        df_polygon = df_polygon.merge(
+            df_yahoo[yahoo_cols],
             on="ticker",
             how="left"
         )
-        print(f"  Merged transaction data for {df_merged['transactions'].notna().sum()} tickers from Polygon")
+        # Use Yahoo Finance volume if available, otherwise use Polygon volume
+        df_polygon["volume"] = df_polygon["Volume"].fillna(df_polygon["volume"])
+        df_polygon["close"] = df_polygon["Price"].fillna(df_polygon["close"])
+        print(f"  Merged Yahoo Finance volume data for {df_polygon['Volume'].notna().sum()} tickers")
     else:
-        print("  Warning: No Polygon transaction data available")
-        df_merged = df_yahoo.copy()
-        df_merged["ticker"] = df_merged["Ticker"].str.upper()
-        df_merged["transactions"] = None
-
+        print("  Warning: No Yahoo Finance volume data available, using Polygon volume only")
+    
     print("Computing ranks...")
-    df_ranks = add_volume_ranks(df_merged)
-
-    # Fetch change% (only ticker + todaysChangePerc) from Polygon snapshot and merge ranks
-    print("Fetching snapshot change% (todaysChangePerc) from Polygon...")
-    df_change = fetch_snapshot_change_perc(api_key, include_otc=include_otc, tickers=None)
-    if not df_change.empty:
-        df_change_ranked = add_change_ranks(df_change)[["ticker", "todays_change_perc", "rank_change_perc"]]
-        df_ranks = df_ranks.merge(df_change_ranked, on="ticker", how="left")
-    else:
-        print("Snapshot change% unavailable; continuing without change% ranks.")
+    df_ranks = add_volume_ranks(df_polygon)
 
     dat_ranks = pd.DataFrame()
     if dat_tickers:
@@ -576,12 +537,12 @@ if __name__ == "__main__":
     
     df_ranks_clean = df_ranks.drop(columns=[col for col in columns_to_drop_csv if col in df_ranks.columns], errors="ignore")
     df_ranks_clean.sort_values(["rank_dollar_volume","rank_transactions"]).to_csv(f"all_ranks_{target_date}.csv", index=False)
-    print(f"Saved full ranks → all_ranks_{target_date}.csv")
+    print(f"Saved full ranks -> all_ranks_{target_date}.csv")
 
     if not dat_ranks.empty:
         dat_ranks_clean = dat_ranks.drop(columns=[col for col in columns_to_drop_csv if col in dat_ranks.columns], errors="ignore")
         dat_ranks_clean.to_csv(f"dat_ranks_{target_date}.csv", index=False)
-        print(f"Saved DAT ranks → dat_ranks_{target_date}.csv")
+        print(f"Saved DAT ranks -> dat_ranks_{target_date}.csv")
 
     # Upload only DAT subset as before
     if get_supabase is not None and not dat_ranks.empty:

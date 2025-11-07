@@ -1157,7 +1157,7 @@ OUT_WARRANTS_RAW_COLS = [
     "source_url","table_heading","row_label","is_total_row",
     "warrants_outstanding","exercise_price_usd",
     "warrant_expiration_date","warrant_term_years",
-    "units_multiplier","score",
+    "units_multiplier",
 ]
 
 def prep_outstanding_warrants_raw_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -1180,7 +1180,7 @@ def prep_outstanding_warrants_raw_df(df: pd.DataFrame) -> pd.DataFrame:
     out["acceptanceDateTime"] = pd.to_datetime(out["acceptanceDateTime"], errors="coerce").astype("string")
     out["warrant_expiration_date"] = pd.to_datetime(out["warrant_expiration_date"], errors="coerce").dt.date.astype("string")
 
-    for c in ("warrants_outstanding","exercise_price_usd","warrant_term_years","units_multiplier","score"):
+    for c in ("warrants_outstanding","exercise_price_usd","warrant_term_years","units_multiplier"):
         out[c] = pd.to_numeric(out[c], errors="coerce")
 
     if "is_total_row" in out.columns:

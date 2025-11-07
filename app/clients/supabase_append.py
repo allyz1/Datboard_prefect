@@ -140,7 +140,7 @@ def upload_df_by_key(
     if df2.empty:
         return {"attempted": attempted, "skipped_existing": skipped_existing, "sent": 0}
 
-    payload = df2.where(pd.notnull(df2), None).to_dict(orient="records")
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
 
     sent = 0
     for i in range(0, len(payload), chunk_size):
@@ -247,7 +247,7 @@ def upload_holdings_raw_df(
     if df2.empty:
         return {"attempted": attempted, "skipped_existing": skipped_existing, "sent": 0}
 
-    payload = df2.where(pd.notnull(df2), None).to_dict(orient="records")
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
 
     sent = 0
     for i in range(0, len(payload), chunk_size):
@@ -556,7 +556,7 @@ def upload_noncrypto_from_cash(
     if df2.empty:
         return {"attempted": attempted, "skipped_existing": skipped_existing, "sent": 0}
     
-    payload = df2.where(pd.notnull(df2), None).to_dict(orient="records")
+    payload = [_normalize_row(r) for r in df2.to_dict(orient="records")]
     
     sent = 0
     for i in range(0, len(payload), chunk_size):

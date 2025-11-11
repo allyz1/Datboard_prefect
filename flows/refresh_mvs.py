@@ -1,8 +1,10 @@
 import os
+import socket
 from urllib.parse import urlparse
 
 import psycopg
 from psycopg import sql
+from psycopg.conninfo import make_conninfo
 from prefect import flow, task, get_run_logger
 
 MVS = [
@@ -67,10 +69,31 @@ def _resolve_dsn() -> str:
     port = os.getenv("SUPABASE_DB_PORT", "5432")
     db_name = os.getenv("SUPABASE_DB_NAME", "postgres")
 
-    return (
-        f"postgres://{user}:{password}@{host}:{port}/{db_name}"
-        "?sslmode=require"
-    )
+    hostaddr = os.getenv("SUPABASE_DB_HOSTADDR")
+    if not hostaddr:
+        try:
+            infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+            ipv4 = next(
+                (info[4][0] for info in infos if info[0] == socket.AF_INET),
+                None,
+            )
+            if ipv4:
+                hostaddr = ipv4
+        except socket.gaierror:
+            hostaddr = None
+
+    params = {
+        "host": host,
+        "port": port,
+        "user": user,
+        "password": password,
+        "dbname": db_name,
+        "sslmode": "require",
+    }
+    if hostaddr:
+        params["hostaddr"] = hostaddr
+
+    return make_conninfo(**params)
 
 @flow(name="refresh-supabase-materialized-views", retries=0, timeout_seconds=60*30)
 def refresh_snapshots_flow():

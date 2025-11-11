@@ -72,14 +72,8 @@ def _resolve_dsn() -> str:
     hostaddr = os.getenv("SUPABASE_DB_HOSTADDR")
     if not hostaddr:
         try:
-            infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-            ipv4 = next(
-                (info[4][0] for info in infos if info[0] == socket.AF_INET),
-                None,
-            )
-            if ipv4:
-                hostaddr = ipv4
-        except socket.gaierror:
+            hostaddr = socket.gethostbyname(host)
+        except Exception:
             hostaddr = None
 
     params = {
@@ -89,6 +83,7 @@ def _resolve_dsn() -> str:
         "password": password,
         "dbname": db_name,
         "sslmode": "require",
+        "connect_timeout": "15",
     }
     if hostaddr:
         params["hostaddr"] = hostaddr

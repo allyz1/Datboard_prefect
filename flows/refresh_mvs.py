@@ -4,7 +4,6 @@ from urllib.parse import urlparse
 
 import psycopg
 from psycopg import sql
-from psycopg.conninfo import make_conninfo
 from prefect import flow, task, get_run_logger
 
 MVS = [
@@ -76,24 +75,35 @@ def _resolve_dsn() -> str:
         except Exception:
             hostaddr = None
 
-    params = {
-        "host": host,
-        "port": port,
-        "user": user,
-        "password": password,
-        "dbname": db_name,
-        "sslmode": "require",
-        "connect_timeout": "15",
-    }
+    parts = [
+        f"host={host}",
+        f"port={port}",
+        f"dbname={db_name}",
+        f"user={user}",
+        f"password={password}",
+        "sslmode=require",
+        "connect_timeout=15",
+    ]
     if hostaddr:
-        params["hostaddr"] = hostaddr
+        parts.insert(1, f"hostaddr={hostaddr}")
 
-    return make_conninfo(**params)
+    return " ".join(parts)
 
 @flow(name="refresh-supabase-materialized-views", retries=0, timeout_seconds=60*30)
 def refresh_snapshots_flow():
     logger = get_run_logger()
     dsn = _resolve_dsn()
+    password = os.getenv("SUPABASE_DB_PASSWORD")
+    masked = dsn if not password else dsn.replace(password, "****")
+    logger.info(f"Conninfo preview: {masked}")
+    try:
+        with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute("SELECT inet_server_addr(), inet_server_port();")
+            addr, port = cur.fetchone()
+            logger.info(f"Connectivity probe successful: {addr}:{port}")
+    except Exception as exc:
+        logger.error(f"Connectivity probe failed: {exc}")
+        raise
     if not _lock.submit(dsn).result():
         logger.info("Another refresh is running; exiting.")
         return

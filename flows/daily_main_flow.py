@@ -79,7 +79,7 @@ from app.prices.polygon_market import get_market_volume_ranks, upload_rankings_t
 
 
 DEFAULT_TABLE = "Holdings_raw"
-DEFAULT_TICKERS = ["MSTR","CEP","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV","UPXI","HSDT","FORD","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR","GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","BTCM","ICG","COSM","KIDZ"]  # ← edit as needed
+DEFAULT_TICKERS = ["MSTR","CEP","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV","UPXI","HSDT","FWDI","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR","GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","BTCM","ICG","COSM","KIDZ"]  # ← edit as needed
 
 # ---------------- Holdings tasks ----------------
 @task(retries=2, retry_delay_seconds=60)
@@ -126,7 +126,7 @@ def t_sec_btc() -> pd.DataFrame:
 @task(retries=2, retry_delay_seconds=60)
 def t_sec_sol() -> pd.DataFrame:
     return get_sec_sol_holdings_df(
-        tickers="HSDT,FORD",
+        tickers="HSDT,FWDI",
         hours_back=24,
         forms=("8-K","10-K","10-Q"),   # match BTC style; expand if you want
         verbose=False,
@@ -661,8 +661,21 @@ def daily_main_pipeline(
         f"skipped={stats_holdings['skipped_existing']} sent={stats_holdings['sent']}"
     )
 
-    # 3) Coinbase daily prices → `coinbase`
-    coinbase_df = t_coinbase_prices.submit().result()
+    # 3-4) Price tasks run in parallel (Coinbase, Polygon prices, Polygon overview)
+    supabase_url = os.getenv("SUPABASE_URL")
+    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+    polygon_tickers = sorted(set((tickers or []) + (polygon_extra_tickers or [])))
+    
+    price_f1 = t_coinbase_prices.submit()
+    price_f2 = t_polygon_prices.submit(polygon_tickers, adjusted=True)
+    price_f3 = t_polygon_ticker_overview.submit(tickers)
+    
+    # Wait for all price tasks
+    coinbase_df = price_f1.result()
+    polygon_df = price_f2.result()
+    polygon_overview_df = price_f3.result()
+    
+    # Upload Coinbase prices
     if not coinbase_df.empty:
         stats_cb = upload_coinbase_df(
             os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"], coinbase_df
@@ -672,13 +685,7 @@ def daily_main_pipeline(
         logger.warning("[Prices -> coinbase] No rows produced for last 3 days.")
         stats_cb = {"attempted": 0, "sent": 0}
 
-    # 4) Polygon daily prices (last 3 days) → `polygon`
-    # Polygon-only ticker set (union base tickers with any extras)
-    polygon_tickers = sorted(set((tickers or []) + (polygon_extra_tickers or [])))
-    polygon_df = t_polygon_prices.submit(polygon_tickers, adjusted=True).result()
-
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_SERVICE_KEY")
+    # Upload Polygon prices
     if not supabase_url or not supabase_key:
         logger.error("[Prices -> polygon] Missing SUPABASE_URL or SUPABASE_SERVICE_KEY")
         polygon_stats = None
@@ -686,32 +693,43 @@ def daily_main_pipeline(
         if not polygon_df.empty:
             polygon_stats = upload_polygon_df(
                 supabase_url, supabase_key, polygon_df,
-                table="polygon", on_conflict="key"  # use "date,ticker" if you use composite PK
+                table="polygon", on_conflict="key"
             )
             logger.info(f"[Prices -> polygon] attempted={polygon_stats['attempted']} sent={polygon_stats['sent']}")
         else:
             logger.warning("[Prices -> polygon] No rows produced for last 3 days.")
             polygon_stats = {"attempted": 0, "sent": 0}
 
-    # 4.5) Polygon ticker overview (yesterday) → Polygon_outstanding_raw
-    polygon_overview_df = t_polygon_ticker_overview.submit(tickers).result()
+    # Upload Polygon ticker overview
     if polygon_overview_df is not None and not polygon_overview_df.empty:
         polygon_overview_stats = t_upload_polygon_ticker_overview.submit(polygon_overview_df).result()
         logger.info(f"[Polygon_outstanding_raw] attempted={polygon_overview_stats.get('attempted', 0)} sent={polygon_overview_stats.get('sent', 0)}")
     else:
         logger.info("[Polygon_outstanding_raw] No ticker overview data for yesterday.")
 
-    # 5) ATM timeline → ATM_raw  (same tickers)
-    atm_df = t_atm_timeline.submit(tickers, hours=atm_hours).result()
-    if atm_df is not None and not atm_df.empty:
-        atm_stats = t_upload_atm.submit(atm_df, upsert=atm_do_upsert).result()
-        logger.info(f"[ATM_raw] attempted={atm_stats.get('attempted', 0)} sent={atm_stats.get('sent', 0)}")
-    else:
-        logger.info("[ATM_raw] No ATM rows in requested window.")
-        atm_stats = {"attempted": 0, "sent": 0}
+    # 5) Quick independent tasks run in parallel (before SEC tasks)
+    quick_f1 = t_recent_filings.submit(
+        tickers=tickers,
+        top_n=5,
+        table="Recent_filings",
+    )
+    quick_f2 = t_crypto_supply.submit()
+    quick_f3 = t_market_rankings.submit(tickers)
+    
+    # Wait for all quick tasks
+    recent_filings_stats = quick_f1.result()
+    crypto_supply_stats = quick_f2.result()
+    market_rankings_stats = quick_f3.result()
+    
+    logger.info(f"[Recent_filings] attempted={recent_filings_stats.get('attempted', 0)} sent={recent_filings_stats.get('sent', 0)}")
+    logger.info(f"[Crypto_supply] attempted={crypto_supply_stats.get('attempted', 0)} sent={crypto_supply_stats.get('sent', 0)}")
+    logger.info(f"[Stock_rankings_daily_pull] attempted={market_rankings_stats.get('attempted', 0)} sent={market_rankings_stats.get('sent', 0)}")
 
-    # 6) NEW: SEC cash → Noncrypto_holdings_raw
-    noncrypto_stats = t_sec_cash_noncrypto.submit(
+    # 6) SEC-related tasks run in batches to avoid rate limiting
+    # SEC recommends max 10 requests/second, so we limit to 3-4 concurrent tasks
+    # Batch 1: Start first 4 tasks
+    sec_f1 = t_atm_timeline.submit(tickers, hours=atm_hours)
+    sec_f2 = t_sec_cash_noncrypto.submit(
         tickers=tickers,
         recent_hours=sec_cash_hours,
         forms="10-K,10-Q,20-F,6-K",
@@ -721,67 +739,81 @@ def daily_main_pipeline(
         limit_filings=300,
         max_docs_per_filing=12,
         do_update=False,
-    ).result()
+    )
+    sec_f3 = t_reg_direct_df.submit(tickers, since_hours=reg_direct_hours)
+    sec_f4 = t_outstanding_df.submit(tickers, since_hours=outstanding_hours)
     
-    # 6) Registered Directs → Reg_direct_raw  (same tickers)
-    rd_df = t_reg_direct_df.submit(tickers, since_hours=reg_direct_hours).result()
-    if rd_df is not None and not rd_df.empty:
-        rd_stats = t_upload_reg_direct.submit(rd_df).result()
-        logger.info(f"[Reg_direct_raw] attempted={rd_stats.get('attempted', 0)} sent={rd_stats.get('sent', 0)}")
-    else:
-        logger.info("[Reg_direct_raw] No Registered Direct rows in requested window.")
-        rd_stats = {"attempted": 0, "sent": 0}
-
-    # Outstanding Shares → Outstanding_shares_raw
-    out_df = t_outstanding_df.submit(tickers, since_hours=outstanding_hours).result()
-    if out_df is not None and not out_df.empty:
-        out_stats = t_upload_outstanding.submit(out_df).result()
-        logger.info(f"[Outstanding_shares_raw] attempted={out_stats.get('attempted', 0)} sent={out_stats.get('sent', 0)}")
-    else:
-        logger.info("[Outstanding_shares_raw] No outstanding-share rows in requested window.")
-        out_stats = {"attempted": 0, "sent": 0}
-
-    # PIPEs → Pipes_raw
-    pipes_df = t_pipes_df.submit(tickers, since_hours=pipes_hours).result()
-    if pipes_df is not None and not pipes_df.empty:
-        pipes_stats = t_upload_pipes.submit(pipes_df).result()
-        logger.info(f"[Pipes_raw] attempted={pipes_stats.get('attempted', 0)} sent={pipes_stats.get('sent', 0)}")
-    else:
-        logger.info("[Pipes_raw] No PIPE rows in requested window.")
-        pipes_stats = {"attempted": 0, "sent": 0}
-
-    # Warrants NEW ISS → Warrants_new_iss_raw
-    warr_stats = t_upload_warrants_new.submit(
+    # Wait for batch 1 to complete before starting batch 2
+    atm_df = sec_f1.result()
+    noncrypto_stats = sec_f2.result()
+    rd_df = sec_f3.result()
+    out_df = sec_f4.result()
+    
+    # Batch 2: Start remaining 3 tasks
+    sec_f5 = t_pipes_df.submit(tickers, since_hours=pipes_hours)
+    sec_f6 = t_upload_warrants_new.submit(
         tickers=tickers,
         recent_hours=warrants_hours,
         table="Warrants_new_iss_raw",
         do_upsert=warrants_do_upsert,
-    ).result()
-    logger.info(f"[Warrants_new_iss_raw] attempted={warr_stats.get('attempted', 0)} sent={warr_stats.get('sent', 0)}")
-    # Outstanding Warrants (row-level) → Outstanding_warrants_raw
-    ow_df = t_warrants_outstanding_df.submit(tickers, since_hours=warrants_hours).result()
+    )
+    sec_f7 = t_warrants_outstanding_df.submit(tickers, since_hours=warrants_hours)
+    
+    # Wait for batch 2
+    pipes_df = sec_f5.result()
+    warr_stats = sec_f6.result()
+    ow_df = sec_f7.result()
+    
+    # Upload SEC data in parallel where possible
+    upload_futures = []
+    if atm_df is not None and not atm_df.empty:
+        upload_futures.append(("atm", t_upload_atm.submit(atm_df, upsert=atm_do_upsert)))
+    if rd_df is not None and not rd_df.empty:
+        upload_futures.append(("rd", t_upload_reg_direct.submit(rd_df)))
+    if out_df is not None and not out_df.empty:
+        upload_futures.append(("out", t_upload_outstanding.submit(out_df)))
+    if pipes_df is not None and not pipes_df.empty:
+        upload_futures.append(("pipes", t_upload_pipes.submit(pipes_df)))
     if ow_df is not None and not ow_df.empty:
-        ow_stats = t_upload_warrants_outstanding.submit(ow_df).result()
-        logger.info(f"[Outstanding_warrants_raw] attempted={ow_stats.get('attempted', 0)} sent={ow_stats.get('sent', 0)}")
-    else:
+        upload_futures.append(("ow", t_upload_warrants_outstanding.submit(ow_df)))
+    
+    # Wait for uploads and log results
+    for name, future in upload_futures:
+        stats = future.result()
+        if name == "atm":
+            atm_stats = stats
+            logger.info(f"[ATM_raw] attempted={atm_stats.get('attempted', 0)} sent={atm_stats.get('sent', 0)}")
+        elif name == "rd":
+            rd_stats = stats
+            logger.info(f"[Reg_direct_raw] attempted={rd_stats.get('attempted', 0)} sent={rd_stats.get('sent', 0)}")
+        elif name == "out":
+            out_stats = stats
+            logger.info(f"[Outstanding_shares_raw] attempted={out_stats.get('attempted', 0)} sent={out_stats.get('sent', 0)}")
+        elif name == "pipes":
+            pipes_stats = stats
+            logger.info(f"[Pipes_raw] attempted={pipes_stats.get('attempted', 0)} sent={pipes_stats.get('sent', 0)}")
+        elif name == "ow":
+            ow_stats = stats
+            logger.info(f"[Outstanding_warrants_raw] attempted={ow_stats.get('attempted', 0)} sent={ow_stats.get('sent', 0)}")
+    
+    # Handle empty results
+    if atm_df is None or atm_df.empty:
+        logger.info("[ATM_raw] No ATM rows in requested window.")
+        atm_stats = {"attempted": 0, "sent": 0}
+    if rd_df is None or rd_df.empty:
+        logger.info("[Reg_direct_raw] No Registered Direct rows in requested window.")
+        rd_stats = {"attempted": 0, "sent": 0}
+    if out_df is None or out_df.empty:
+        logger.info("[Outstanding_shares_raw] No outstanding-share rows in requested window.")
+        out_stats = {"attempted": 0, "sent": 0}
+    if pipes_df is None or pipes_df.empty:
+        logger.info("[Pipes_raw] No PIPE rows in requested window.")
+        pipes_stats = {"attempted": 0, "sent": 0}
+    if ow_df is None or ow_df.empty:
         logger.info("[Outstanding_warrants_raw] No warrant rows in requested window.")
         ow_stats = {"attempted": 0, "sent": 0}
-
-    # Recent Filings → Recent_filings
-    recent_filings_stats = t_recent_filings.submit(
-        tickers=tickers,
-        top_n=5,
-        table="Recent_filings",
-    ).result()
-    logger.info(f"[Recent_filings] attempted={recent_filings_stats.get('attempted', 0)} sent={recent_filings_stats.get('sent', 0)}")
-
-    # Crypto Supply Data → Crypto_supply
-    crypto_supply_stats = t_crypto_supply.submit().result()
-    logger.info(f"[Crypto_supply] attempted={crypto_supply_stats.get('attempted', 0)} sent={crypto_supply_stats.get('sent', 0)}")
-
-    # Market Rankings → Stock_rankings_daily_pull
-    market_rankings_stats = t_market_rankings.submit(tickers).result()
-    logger.info(f"[Stock_rankings_daily_pull] attempted={market_rankings_stats.get('attempted', 0)} sent={market_rankings_stats.get('sent', 0)}")
+    
+    logger.info(f"[Warrants_new_iss_raw] attempted={warr_stats.get('attempted', 0)} sent={warr_stats.get('sent', 0)}")
 
     return {
         "holdings": stats_holdings,

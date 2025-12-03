@@ -6,8 +6,8 @@ from prefect.blocks.system import Secret  # ok to keep even if not referenced di
 
 LONG_TICKERS = [
     "MSTR","CEP","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV",
-    "UPXI","HSDT","FORD","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR",
-    "GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","BTCM","ICG","COSM","KIDZ"
+    "UPXI","HSDT","FWDI","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR",
+    "GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","ICG","COSM","KIDZ"
 ]
 
 if __name__ == "__main__":

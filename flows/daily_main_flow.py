@@ -109,7 +109,7 @@ def t_btcs() -> pd.DataFrame:
 @task(retries=2, retry_delay_seconds=60)
 def t_sec_eth() -> pd.DataFrame:
     return get_sec_eth_holdings_df(
-        tickers="BMNR,SBET,BTBT,ETHZ",
+        tickers="BMNR,SBET,BTBT,ETHZ,ETHM,BTCS,FGNX,GAME",
         hours_back=24,
         forms=("8-K","10-K","10-Q"),
         verbose=False,
@@ -118,7 +118,7 @@ def t_sec_eth() -> pd.DataFrame:
 @task(retries=2, retry_delay_seconds=60)
 def t_sec_btc() -> pd.DataFrame:
     return get_sec_btc_holdings_df(
-        tickers="MSTR,CEP,NAKA,SMLR",
+        tickers="MSTR,MARA,CEP,DJT,CLSK,SMLR,NAKA,BRR,GME,EMPD,SQNS,FLD,USBC,LMFA",
         hours_back=24,
         forms=("8-K","10-K","10-Q"),
         verbose=False,
@@ -126,7 +126,7 @@ def t_sec_btc() -> pd.DataFrame:
 @task(retries=2, retry_delay_seconds=60)
 def t_sec_sol() -> pd.DataFrame:
     return get_sec_sol_holdings_df(
-        tickers="HSDT,FWDI",
+        tickers="HSDT,FWDI,DFDV,UPXI,STSS,KIDZ",
         hours_back=24,
         forms=("8-K","10-K","10-Q"),   # match BTC style; expand if you want
         verbose=False,

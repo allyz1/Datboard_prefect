@@ -334,9 +334,11 @@ def get_sec_btc_holdings_df(
     }).dropna(subset=["total_holdings"])
 
     # De-dupe by (ticker, date) keeping MAX holdings for that day
+    # Sort by total_holdings descending, then groupby and take first to preserve all columns including asset
     out = (
-        out.groupby(["ticker", "date"], as_index=False, sort=True)["total_holdings"]
-           .max()
+        out.sort_values(["ticker", "date", "total_holdings"], ascending=[True, True, False])
+           .groupby(["ticker", "date"], as_index=False)
+           .first()
            .sort_values(["ticker", "date"])
            .reset_index(drop=True)
     )

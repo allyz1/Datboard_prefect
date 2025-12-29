@@ -79,7 +79,7 @@ from app.prices.polygon_market import get_market_volume_ranks, upload_rankings_t
 
 
 DEFAULT_TABLE = "Holdings_raw"
-DEFAULT_TICKERS = ["MSTR","CEP","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV","UPXI","HSDT","FWDI","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR","GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","BTCM","ICG","COSM","KIDZ"]  # ← edit as needed
+DEFAULT_TICKERS = ["MSTR","XXI","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV","UPXI","HSDT","FWDI","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR","GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","BTCM","ICG","COSM","KIDZ"]  # ← edit as needed
 
 # ---------------- Holdings tasks ----------------
 @task(retries=2, retry_delay_seconds=60)
@@ -116,10 +116,10 @@ def t_sec_eth() -> pd.DataFrame:
     )
 
 @task(retries=2, retry_delay_seconds=60)
-def t_sec_btc() -> pd.DataFrame:
+def t_sec_btc(hours_back: int = 336) -> pd.DataFrame:
     return get_sec_btc_holdings_df(
-        tickers="MSTR,MARA,CEP,DJT,CLSK,SMLR,NAKA,BRR,GME,EMPD,SQNS,FLD,USBC,LMFA",
-        hours_back=24,
+        tickers="MSTR,MARA,XXI,DJT,CLSK,SMLR,NAKA,BRR,GME,EMPD,SQNS,FLD,USBC,LMFA",
+        hours_back=hours_back,
         forms=("8-K","10-K","10-Q"),
         verbose=False,
     )
@@ -624,14 +624,15 @@ def daily_main_pipeline(
     table: str = DEFAULT_TABLE,
     do_update: bool = False,
     tickers: list[str] | None = None,       # <- single list used for Polygon + ATM
-    atm_hours: int = 24,
+    atm_hours: int = 336,
     atm_do_upsert: bool = False,
-    sec_cash_hours: int = 24,
-    reg_direct_hours: int = 24,
+    sec_cash_hours: int = 336,
+    sec_btc_hours: int = 336,
+    reg_direct_hours: int = 336,
     reg_direct_do_upsert: bool = True,
-    outstanding_hours: int = 24,
-    pipes_hours: int = 24,
-    warrants_hours: int = 24,
+    outstanding_hours: int = 336,
+    pipes_hours: int = 336,
+    warrants_hours: int = 336,
     warrants_do_upsert: bool = False,
     polygon_extra_tickers: list[str] | None = None,
 ):
@@ -644,7 +645,7 @@ def daily_main_pipeline(
     f3 = t_naka.submit()
     f4 = t_btcs.submit()
     f5 = t_sec_eth.submit()
-    f6 = t_sec_btc.submit()
+    f6 = t_sec_btc.submit(hours_back=sec_btc_hours)
     f7 = t_upxi.submit()  # if you want to include UPXI holdings
     f8 = t_sec_sol.submit()  # if you want to include SOL holdings
     f9 = t_hsdt.submit()  # HSDT SOL holdings from press releases

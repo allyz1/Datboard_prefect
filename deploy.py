@@ -5,7 +5,7 @@ from prefect.runner.storage import GitRepository
 from prefect.blocks.system import Secret  # ok to keep even if not referenced directly
 
 LONG_TICKERS = [
-    "MSTR","CEP","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV",
+    "MSTR","XXI","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV",
     "UPXI","HSDT","FWDI","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR",
     "GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","ICG","COSM","KIDZ"
 ]
@@ -29,6 +29,7 @@ if __name__ == "__main__":
             "atm_do_upsert": False,
             "polygon_extra_tickers": ["ORBS"],
             "sec_cash_hours": 24,
+            "sec_btc_hours": 336,
             "reg_direct_hours": 24,
             "reg_direct_do_upsert": True,
             "outstanding_hours": 24,

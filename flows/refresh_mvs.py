@@ -70,10 +70,19 @@ def _resolve_dsn() -> str:
 
     hostaddr = os.getenv("SUPABASE_DB_HOSTADDR")
     if not hostaddr:
+        # Force IPv4 resolution (AF_INET) to avoid IPv6 unreachable on managed pools
         try:
-            hostaddr = socket.gethostbyname(host)
+            infos = socket.getaddrinfo(host, int(port), socket.AF_INET, socket.SOCK_STREAM)
+            if infos:
+                hostaddr = infos[0][4][0]
         except Exception:
-            hostaddr = None
+            pass
+        # Fallback: plain gethostbyname (IPv4 only)
+        if not hostaddr:
+            try:
+                hostaddr = socket.gethostbyname(host)
+            except Exception:
+                hostaddr = None
 
     parts = [
         f"host={host}",

@@ -77,9 +77,10 @@ from app.clients.upload_coinbase import upload_crypto_supply_df
 # Market rankings
 from app.prices.polygon_market import get_market_volume_ranks, upload_rankings_to_supabase
 
+CURRENT_YEAR = datetime.now(timezone.utc).year
 
 DEFAULT_TABLE = "Holdings_raw"
-DEFAULT_TICKERS = ["MSTR","XXI","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV","UPXI","HSDT","FWDI","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR","GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","BTCM","ICG","COSM","KIDZ"]  # ← edit as needed
+DEFAULT_TICKERS = ["MSTR","XXI","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV","UPXI","HSDT","FWDI","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR","GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","ICG","COSM","KIDZ"]  # ← edit as needed
 
 # ---------------- Holdings tasks ----------------
 @task(retries=2, retry_delay_seconds=60)
@@ -96,7 +97,7 @@ def t_naka() -> pd.DataFrame:
 
 @task(retries=2, retry_delay_seconds=60)
 def t_upxi() -> pd.DataFrame:
-    return crawl_holdings_df(ticker="UPXI", min_year=2025)
+    return crawl_holdings_df(ticker="UPXI", min_year=CURRENT_YEAR)
 
 @task(retries=2, retry_delay_seconds=60)
 def t_hsdt() -> pd.DataFrame:
@@ -104,7 +105,7 @@ def t_hsdt() -> pd.DataFrame:
 
 @task(retries=2, retry_delay_seconds=60)
 def t_btcs() -> pd.DataFrame:
-    return get_btcs_eth_holdings_df(year=2025)
+    return get_btcs_eth_holdings_df(year=CURRENT_YEAR)
 
 @task(retries=2, retry_delay_seconds=60)
 def t_sec_eth() -> pd.DataFrame:
@@ -118,7 +119,7 @@ def t_sec_eth() -> pd.DataFrame:
 @task(retries=2, retry_delay_seconds=60)
 def t_sec_btc(hours_back: int = 336) -> pd.DataFrame:
     return get_sec_btc_holdings_df(
-        tickers="MSTR,MARA,XXI,DJT,CLSK,SMLR,NAKA,BRR,GME,EMPD,SQNS,FLD,USBC,LMFA",
+        tickers="MSTR,MARA,XXI,DJT,CLSK,NAKA,BRR,GME,EMPD,SQNS,FLD,USBC,LMFA",
         hours_back=hours_back,
         forms=("8-K","10-K","10-Q"),
         verbose=False,
@@ -235,7 +236,7 @@ def t_reg_direct_df(tickers: list[str], since_hours: int = 24) -> pd.DataFrame:
         return pd.DataFrame()
 
     params = dict(
-        year=2025,
+        year=CURRENT_YEAR,
         year_by="accession",
         limit=600,
         max_docs=6,
@@ -252,10 +253,15 @@ def t_reg_direct_df(tickers: list[str], since_hours: int = 24) -> pd.DataFrame:
     if not hasattr(RD, "build_for_ticker"):
         raise ImportError("run_reg_direct module lacks build_for_tickers and build_for_ticker")
 
+    logger = get_run_logger()
     frames: list[pd.DataFrame] = []
     uniq = sorted({str(t).strip().upper() for t in tickers if str(t).strip()})
     for tk in uniq:
-        df_t = RD.build_for_ticker(tk, **params)
+        try:
+            df_t = RD.build_for_ticker(tk, **params)
+        except Exception as exc:
+            logger.warning(f"[Reg Direct] {tk} ERROR — skipping: {exc}")
+            continue
         if isinstance(df_t, pd.DataFrame) and not df_t.empty:
             frames.append(df_t)
 
@@ -282,7 +288,7 @@ def t_outstanding_df(tickers: list[str], since_hours: int = 24) -> pd.DataFrame:
         return pd.DataFrame()
 
     params = dict(
-        year=2025,
+        year=CURRENT_YEAR,
         year_by="filingdate",     # your script default; acceptance window is controlled by since_hours/use_acceptance
         limit=400,
         max_docs=4,
@@ -291,10 +297,15 @@ def t_outstanding_df(tickers: list[str], since_hours: int = 24) -> pd.DataFrame:
         use_acceptance=True,
     )
 
+    logger = get_run_logger()
     frames: list[pd.DataFrame] = []
     uniq = sorted({str(t).strip().upper() for t in tickers if str(t).strip()})
     for tk in uniq:
-        df_t = OUT.build_for_ticker(tk, **params)
+        try:
+            df_t = OUT.build_for_ticker(tk, **params)
+        except Exception as exc:
+            logger.warning(f"[Outstanding] {tk} ERROR — skipping: {exc}")
+            continue
         if isinstance(df_t, pd.DataFrame) and not df_t.empty:
             frames.append(df_t)
 
@@ -319,7 +330,7 @@ def t_pipes_df(tickers: list[str], since_hours: int = 24) -> pd.DataFrame:
         return pd.DataFrame()
 
     params = dict(
-        year=2025,
+        year=CURRENT_YEAR,
         year_by="accession",
         limit=600,
         max_docs=6,
@@ -328,10 +339,15 @@ def t_pipes_df(tickers: list[str], since_hours: int = 24) -> pd.DataFrame:
         use_acceptance=True,
     )
 
+    logger = get_run_logger()
     frames: list[pd.DataFrame] = []
     uniq = sorted({str(t).strip().upper() for t in tickers if str(t).strip()})
     for tk in uniq:
-        df_t = PIPES.build_for_ticker(tk, **params)
+        try:
+            df_t = PIPES.build_for_ticker(tk, **params)
+        except Exception as exc:
+            logger.warning(f"[Pipes] {tk} ERROR — skipping: {exc}")
+            continue
         if isinstance(df_t, pd.DataFrame) and not df_t.empty:
             frames.append(df_t)
 
@@ -474,7 +490,7 @@ def t_sec_cash_noncrypto(
     recent_hours: int = 24,
     forms: str = "10-K,10-Q,20-F,6-K",
     from_date: str = "2024-01-01",
-    year: int = 2025,
+    year: int = None,
     year_by: str = "accession",
     limit_filings: int = 300,
     max_docs_per_filing: int = 12,
@@ -486,6 +502,8 @@ def t_sec_cash_noncrypto(
     then upload them to Noncrypto_holdings_raw.
     """
     logger = get_run_logger()
+    if year is None:
+        year = CURRENT_YEAR
     frames: list[pd.DataFrame] = []
 
     for tk in tickers:
@@ -735,7 +753,7 @@ def daily_main_pipeline(
         recent_hours=sec_cash_hours,
         forms="10-K,10-Q,20-F,6-K",
         from_date="2024-01-01",
-        year=2025,
+        year=CURRENT_YEAR,
         year_by="accession",
         limit_filings=300,
         max_docs_per_filing=12,

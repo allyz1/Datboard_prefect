@@ -5,7 +5,7 @@ from prefect.runner.storage import GitRepository
 from prefect.blocks.system import Secret  # ok to keep even if not referenced directly
 
 LONG_TICKERS = [
-    "MSTR","XXI","SMLR","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV",
+    "MSTR","XXI","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV",
     "UPXI","HSDT","FWDI","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR",
     "GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","ICG","COSM","KIDZ"
 ]
@@ -25,16 +25,16 @@ if __name__ == "__main__":
             "table": "Holdings_raw",
             "do_update": False,
             "tickers": LONG_TICKERS,
-            "atm_hours": 24,
+            "atm_hours": 336,
             "atm_do_upsert": False,
             "polygon_extra_tickers": ["ORBS"],
-            "sec_cash_hours": 24,
+            "sec_cash_hours": 336,
             "sec_btc_hours": 336,
-            "reg_direct_hours": 24,
+            "reg_direct_hours": 336,
             "reg_direct_do_upsert": True,
-            "outstanding_hours": 24,
-            "pipes_hours": 24,
-            "warrants_hours": 24,
+            "outstanding_hours": 336,
+            "pipes_hours": 336,
+            "warrants_hours": 336,
             "warrants_do_upsert": False,
         },
         job_variables={

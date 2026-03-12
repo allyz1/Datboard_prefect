@@ -26,7 +26,7 @@ PAGE_SLEEP = 0.12
 
 MONTHS = ("January","February","March","April","May","June","July",
           "August","September","October","November","December")
-DATE_2025_RE = re.compile(rf'\b(?:{"|".join(MONTHS)})\s+\d{{1,2}},\s*2025\b', re.I)
+DATE_YEAR_RE = re.compile(rf'\b(?:{"|".join(MONTHS)})\s+\d{{1,2}},\s*\d{{4}}\b', re.I)
 
 # Title filters (disable by passing include_all_titles=True)
 ETH_RE = re.compile(r'\b(?:ETH|Ether(?:eum)?|digital[-\s]?assets?)\b', re.I)
@@ -79,7 +79,7 @@ def parse_listing_page(html: str, page_url: str) -> List[Dict]:
         text = clean_text(a.get_text(" ", strip=True))
         if not text:
             continue
-        m = DATE_2025_RE.search(text)
+        m = DATE_YEAR_RE.search(text)
         if not m:
             continue
         title = text[:m.start()].strip(" –—-: ")

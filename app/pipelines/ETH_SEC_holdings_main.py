@@ -268,14 +268,18 @@ def get_sec_eth_holdings_df(
     for t in tickers:
         if verbose:
             print(f"\n=== SEC ETH pipeline (last {hours_back}h): {t} ===")
-        dft = run_sec_for_ticker(
-            ticker=t,
-            forms=forms,
-            hours_back=hours_back,
-            limit=limit,
-            max_docs=max_docs,
-            debug=verbose,
-        )
+        try:
+            dft = run_sec_for_ticker(
+                ticker=t,
+                forms=forms,
+                hours_back=hours_back,
+                limit=limit,
+                max_docs=max_docs,
+                debug=verbose,
+            )
+        except Exception as exc:
+            print(f"[{t}] ERROR — skipping ticker: {exc}")
+            continue
         if dft.empty:
             if verbose:
                 print(f"[{t}] No new filings in the last {hours_back}h — skipping.")

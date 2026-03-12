@@ -150,7 +150,17 @@ def _parse_tables(root: etree._Element) -> List[List[List[str]]]:
                 cells = tr.xpath(xpath_cell, namespaces=NS)
                 if not cells:
                     continue
-                row = [_join_text(c) for c in cells]
+                row = []
+                for c in cells:
+                    text = _join_text(c)
+                    colspan = 1
+                    try:
+                        colspan = int(c.get("colspan", 1))
+                    except (ValueError, TypeError):
+                        pass
+                    row.append(text)
+                    for _ in range(colspan - 1):
+                        row.append("")
                 rows.append(row)
             if rows:
                 w = max(len(r) for r in rows)
@@ -170,19 +180,37 @@ def _find_btc_header_row(rows: List[List[str]]) -> Optional[int]:
 
 def _map_header_indices(header_row: List[str]) -> Dict[str,int]:
     idx: Dict[str,int] = {}
+
+    # First pass: find the pivot column "Aggregate BTC Holdings"
+    holdings_j = None
+    for j, cell in enumerate(header_row):
+        if "aggregatebtcholdings" in _norm_token(cell):
+            holdings_j = j
+            break
+
     seen_avg = 0
+    seen_agg_price = 0
     for j, cell in enumerate(header_row):
         n = _norm_token(cell)
         if not n:
             continue
         if "btcacquired" in n:
             idx["period_btc_acquired"] = j
-        elif "aggregatepurchaseprice" in n and "inmillions" in n:
-            idx["period_agg_purchase_millions"] = j
-        elif "aggregatepurchaseprice" in n and "inbillions" in n:
-            idx["total_agg_purchase_billions"] = j
         elif "aggregatebtcholdings" in n:
             idx["total_btc_holdings"] = j
+        elif "aggregatepurchaseprice" in n:
+            is_period = holdings_j is not None and j < holdings_j
+            if is_period:
+                if "inmillions" in n:
+                    idx["period_agg_purchase_millions"] = j
+                else:
+                    idx["period_agg_purchase_billions"] = j
+            else:
+                if "inmillions" in n:
+                    idx["total_agg_purchase_millions"] = j
+                else:
+                    idx["total_agg_purchase_billions"] = j
+            seen_agg_price += 1
         elif "averagepurchaseprice" in n:
             if seen_avg == 0:
                 idx["period_avg_purchase_price"] = j
@@ -218,6 +246,9 @@ def parse_btc_table_rows(rows: List[List[str]]) -> Optional[Dict[str, Any]]:
     if "period_agg_purchase_millions" in idx:
         v = _money_to_float(data[idx["period_agg_purchase_millions"]])
         out["period_agg_purchase_price_usd"] = v * 1_000_000 if v is not None else None
+    elif "period_agg_purchase_billions" in idx:
+        v = _money_to_float(data[idx["period_agg_purchase_billions"]])
+        out["period_agg_purchase_price_usd"] = v * 1_000_000_000 if v is not None else None
     if "period_avg_purchase_price" in idx:
         out["period_avg_purchase_price_usd"] = _money_to_float(data[idx["period_avg_purchase_price"]]) or _number_to_float(data[idx["period_avg_purchase_price"]])
     if "total_btc_holdings" in idx:
@@ -225,6 +256,9 @@ def parse_btc_table_rows(rows: List[List[str]]) -> Optional[Dict[str, Any]]:
     if "total_agg_purchase_billions" in idx:
         v = _money_to_float(data[idx["total_agg_purchase_billions"]])
         out["total_agg_purchase_price_usd"] = v * 1_000_000_000 if v is not None else None
+    elif "total_agg_purchase_millions" in idx:
+        v = _money_to_float(data[idx["total_agg_purchase_millions"]])
+        out["total_agg_purchase_price_usd"] = v * 1_000_000 if v is not None else None
     if "total_avg_purchase_price" in idx:
         out["total_avg_purchase_price_usd"] = _money_to_float(data[idx["total_avg_purchase_price"]]) or _number_to_float(data[idx["total_avg_purchase_price"]])
     for k in ("period_btc_acquired", "total_btc_holdings"):

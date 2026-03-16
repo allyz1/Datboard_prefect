@@ -5,7 +5,7 @@ from prefect.runner.storage import GitRepository
 from prefect.blocks.system import Secret  # ok to keep even if not referenced directly
 
 LONG_TICKERS = [
-    "MSTR","XXI","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV",
+    "MSTR","XXI","NAKA","SQNS","BMNR","SBET","BTCS","BTBT","GAME","DFDV",
     "UPXI","HSDT","FWDI","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR",
     "GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","ICG","COSM","KIDZ"
 ]

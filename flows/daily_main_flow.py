@@ -80,7 +80,7 @@ from app.prices.polygon_market import get_market_volume_ranks, upload_rankings_t
 CURRENT_YEAR = datetime.now(timezone.utc).year
 
 DEFAULT_TABLE = "Holdings_raw"
-DEFAULT_TICKERS = ["MSTR","XXI","NAKA","SQNS","BMNR","SBET","ETHZ","BTCS","BTBT","GAME","DFDV","UPXI","HSDT","FWDI","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR","GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","ICG","COSM","KIDZ"]  # ← edit as needed
+DEFAULT_TICKERS = ["MSTR","XXI","NAKA","SQNS","BMNR","SBET","BTCS","BTBT","GAME","DFDV","UPXI","HSDT","FWDI","ETHM","STSS","FGNX","STKE","MARA","DJT","GLXY","CLSK","BRR","GME","EMPD","CORZ","FLD","USBC","LMFA","DEFT","GNS","ICG","COSM","KIDZ"]  # ← edit as needed
 
 # ---------------- Holdings tasks ----------------
 @task(retries=2, retry_delay_seconds=60)
@@ -110,7 +110,7 @@ def t_btcs() -> pd.DataFrame:
 @task(retries=2, retry_delay_seconds=60)
 def t_sec_eth() -> pd.DataFrame:
     return get_sec_eth_holdings_df(
-        tickers="BMNR,SBET,BTBT,ETHZ,ETHM,BTCS,FGNX,GAME",
+        tickers="BMNR,SBET,BTBT,ETHM,BTCS,FGNX,GAME",
         hours_back=24,
         forms=("8-K","10-K","10-Q"),
         verbose=False,
